@@ -13,10 +13,7 @@ const pendingInput = new Map();
 function startBot() {
   const bot = telegram.getBot();
 
-  bot.setMyCommands([
-    { command: "menu", description: "Buka menu tombol" },
-    { command: "start", description: "Mulai / buka menu" },
-  ]).catch((err) => logger.warn("setMyCommands", { err: err.message }));
+  telegram.setupMenuChrome().catch((err) => logger.warn("setup menu chrome", { err: err.message }));
 
   bot.onText(/\/start/, (msg) => gated(msg, handleStart));
   bot.onText(/\/menu/, (msg) => gated(msg, (m) => renderMenu(m.chat.id)));
@@ -45,47 +42,47 @@ async function gated(msg, fn) {
 async function handleStart(msg) {
   pendingInput.delete(msg.chat.id);
   const status = lastScan.load();
-  await telegram.show(
+  await telegram.pinReplyBar(
     msg.chat.id,
     [
-      "<b>Solana LP Scanner</b>",
-      "Alert-only — tidak mengeksekusi transaksi.",
-      "Scan otomatis tiap 5 menit. Semua pengaturan lewat tombol.",
+      "<b>LP Scanner</b>",
+      "Alert-only — tidak eksekusi transaksi.",
+      "Scan tiap 5 menit. Tap <b>Menu</b> di samping kolom ketik kapan saja.",
       "",
       status.at ? `Last scan: ${status.at}` : "Belum ada scan.",
       status.paused ? "Status: <b>PAUSED</b>" : "Status: running",
-    ].join("\n"),
-    mainKeyboard()
+    ].join("\n")
   );
+  await renderMenu(msg.chat.id);
 }
 
 function mainKeyboard() {
   const paused = lastScan.load().paused;
   return [
     [
-      { text: "Pool menarik", callback_data: "pools" },
-      { text: "Scan sekarang", callback_data: "scan" },
+      { text: "💧 Pool menarik", callback_data: "pools" },
+      { text: "🔎 Scan", callback_data: "scan" },
     ],
     [
-      { text: "Status", callback_data: "status" },
-      { text: paused ? "Resume scan" : "Pause scan", callback_data: "pause" },
-    ],
-    [{ text: "Filter Liquidity", callback_data: "cat:Liquidity" }],
-    [
-      { text: "Filter Holder", callback_data: "cat:Holder" },
-      { text: "Filter Risk", callback_data: "cat:Risk" },
+      { text: "ℹ Status", callback_data: "status" },
+      { text: paused ? "▶ Resume" : "⏸ Pause", callback_data: "pause" },
     ],
     [
-      { text: "Filter Age", callback_data: "cat:Age" },
-      { text: "Discovery", callback_data: "cat:Discovery" },
+      { text: "💰 Liquidity", callback_data: "cat:Liquidity" },
+      { text: "👥 Holder", callback_data: "cat:Holder" },
     ],
-    [{ text: "KOL avoid / green", callback_data: "kol" }],
-    [{ text: "Reset config default", callback_data: "reset" }],
+    [
+      { text: "🛡 Risk", callback_data: "cat:Risk" },
+      { text: "⏱ Age", callback_data: "cat:Age" },
+      { text: "📡 Discovery", callback_data: "cat:Discovery" },
+    ],
+    [{ text: "★ KOL avoid / green", callback_data: "kol" }],
+    [{ text: "↺ Reset default", callback_data: "reset" }],
   ];
 }
 
 function backMenu() {
-  return [[{ text: "« Menu", callback_data: "menu" }]];
+  return [[{ text: "← Menu", callback_data: "menu" }]];
 }
 
 async function renderMenu(chatId, messageId) {
@@ -171,10 +168,10 @@ async function renderKol(chatId, messageId) {
   }
 
   keyboard.push([
-    { text: "Tambah Avoid", callback_data: "koladd:avoid" },
-    { text: "Tambah Green", callback_data: "koladd:green" },
+    { text: "⚠ Tambah Avoid", callback_data: "koladd:avoid" },
+    { text: "★ Tambah Green", callback_data: "koladd:green" },
   ]);
-  keyboard.push([{ text: "« Menu", callback_data: "menu" }]);
+  keyboard.push([{ text: "← Menu", callback_data: "menu" }]);
   await telegram.show(chatId, lines.join("\n"), keyboard, messageId);
 }
 
@@ -185,8 +182,8 @@ async function renderPools(chatId, messageId) {
       chatId,
       "Belum ada hasil. Tap <b>Scan sekarang</b> atau tunggu cycle 5 menit.",
       [
-        [{ text: "Scan sekarang", callback_data: "scan" }],
-        [{ text: "« Menu", callback_data: "menu" }],
+        [{ text: "🔎 Scan sekarang", callback_data: "scan" }],
+        [{ text: "← Menu", callback_data: "menu" }],
       ],
       messageId
     );
@@ -196,8 +193,8 @@ async function renderPools(chatId, messageId) {
     chatId,
     telegram.formatList(status.recommended, `<b>Pool menarik</b> · ${status.at}`),
     [
-      [{ text: "Scan ulang", callback_data: "scan" }],
-      [{ text: "« Menu", callback_data: "menu" }],
+      [{ text: "🔎 Scan ulang", callback_data: "scan" }],
+      [{ text: "← Menu", callback_data: "menu" }],
     ],
     messageId
   );
@@ -212,7 +209,7 @@ async function runScanFromMenu(chatId, messageId) {
       result.recommended,
       `<b>Scan selesai</b> · ${result.scanned} pool · ${result.recommended.length} lolos`
     ),
-    [[{ text: "« Menu", callback_data: "menu" }]],
+    [[{ text: "← Menu", callback_data: "menu" }]],
     messageId
   );
 }
@@ -328,7 +325,7 @@ async function startEditIndicator(chatId, key, messageId) {
         callback_data: `set:${key}:${opt}`,
       },
     ]);
-    keyboard.push([{ text: `« ${cat}`, callback_data: `cat:${cat}` }]);
+    keyboard.push([{ text: `← ${cat}`, callback_data: `cat:${cat}` }]);
     return telegram.show(
       chatId,
       `${meta.label}\nSekarang: <b>${formatVal(config[key])}</b>`,
@@ -347,14 +344,22 @@ async function startEditIndicator(chatId, key, messageId) {
       "Kirim angka baru di chat ini.",
       "0 = matikan filter (kecuali volume 24h / creator).",
     ].join("\n"),
-    [[{ text: `« ${cat}`, callback_data: `cat:${cat}` }]],
+    [[{ text: `← ${cat}`, callback_data: `cat:${cat}` }]],
     messageId
   );
 }
 
 async function handlePlain(msg) {
-  if (!msg.text || msg.text.startsWith("/")) return;
+  if (!msg.text) return;
   if (!telegram.isAllowed(msg.chat.id)) return;
+
+  if (telegram.isMenuTap(msg.text)) {
+    pendingInput.delete(msg.chat.id);
+    await renderMenu(msg.chat.id);
+    return;
+  }
+
+  if (msg.text.startsWith("/")) return;
   const pending = pendingInput.get(msg.chat.id);
   if (!pending) return;
 

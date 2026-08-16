@@ -28,6 +28,43 @@ function targetChat() {
   return allowedChatId();
 }
 
+const REPLY_MENU_LABEL = "Menu";
+
+function replyBar() {
+  return {
+    keyboard: [[{ text: REPLY_MENU_LABEL }]],
+    resize_keyboard: true,
+    is_persistent: true,
+    input_field_placeholder: "/menu",
+  };
+}
+
+function isMenuTap(text) {
+  const t = String(text || "").trim();
+  return t === REPLY_MENU_LABEL || t === "☰ Menu";
+}
+
+async function pinReplyBar(chatId, text = "Menu siap. Tap <b>Menu</b> di bawah kapan saja.") {
+  const id = chatId || targetChat();
+  if (!id) return;
+  return getBot().sendMessage(id, text, {
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    reply_markup: replyBar(),
+  });
+}
+
+async function setupMenuChrome() {
+  const b = getBot();
+  await b.setMyCommands([
+    { command: "menu", description: "Buka menu" },
+    { command: "start", description: "Mulai bot" },
+  ]);
+  await b.setChatMenuButton({
+    menu_button: JSON.stringify({ type: "commands" }),
+  });
+}
+
 async function send(chatId, text, extra = {}) {
   const id = chatId || targetChat();
   if (!id) {
@@ -120,4 +157,19 @@ function formatList(items, title) {
   return `${title}\n\n${rows.join("\n\n")}`;
 }
 
-module.exports = { getBot, isAllowed, allowedChatId, targetChat, send, edit, show, formatAlert, formatList };
+module.exports = {
+  getBot,
+  isAllowed,
+  allowedChatId,
+  targetChat,
+  send,
+  edit,
+  show,
+  formatAlert,
+  formatList,
+  replyBar,
+  isMenuTap,
+  pinReplyBar,
+  setupMenuChrome,
+  REPLY_MENU_LABEL,
+};
