@@ -75,7 +75,23 @@ Lihat `.env.example`. Minimal:
 
 - `TELEGRAM_BOT_TOKEN`
 - `ALLOWED_CHAT_ID` — angka chat id kamu (`@userinfobot`)
-- `SOLANA_RPC_URL` — Helius / QuickNode lebih aman dari public RPC kalau KOL list panjang
+- `SOLANA_RPC_URL` — default RPC publik (gratis)
+- `HELIUS_API_KEY` — fallback otomatis kalau RPC publik kena 429/timeout
+
+### RPC: publik dulu, Helius cadangan
+
+Default: pakai `https://api.mainnet-beta.solana.com`. Isi `HELIUS_API_KEY` di `.env` — kalau publik gagal, bot pindah ke Helius sendiri.
+
+```env
+SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+HELIUS_API_KEY=isi-api-key-helius
+```
+
+Mau Helius jadi **utama** (lebih stabil 24/7):
+
+```env
+SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=isi-api-key-helius
+```
 
 DexPaprika keyless cukup (30 req/menit). Cycle 5 menit + enrichment terbatas aman di limit itu.
 

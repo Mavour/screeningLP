@@ -1,43 +1,34 @@
-const { Connection, PublicKey } = require("@solana/web3.js");
+const { PublicKey } = require("@solana/web3.js");
 const logger = require("../lib/logger");
 const { mapLimit } = require("../lib/http");
-
-let connection;
-
-function getConnection() {
-  if (!connection) {
-    connection = new Connection(process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com", {
-      commitment: "confirmed",
-    });
-  }
-  return connection;
-}
+const rpc = require("../lib/rpc");
 
 async function getHeldMints(walletAddress) {
-  const conn = getConnection();
   const owner = new PublicKey(walletAddress);
-  const res = await conn.getParsedTokenAccountsByOwner(owner, {
-    programId: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
-  });
-  const held = new Set();
-  for (const acc of res.value) {
-    const info = acc.account.data.parsed?.info;
-    const amount = Number(info?.tokenAmount?.uiAmount || 0);
-    if (amount > 0 && info?.mint) held.add(info.mint);
-  }
-  try {
-    const t22 = await conn.getParsedTokenAccountsByOwner(owner, {
-      programId: new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"),
+  return rpc.withRpc(async (conn) => {
+    const res = await conn.getParsedTokenAccountsByOwner(owner, {
+      programId: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
     });
-    for (const acc of t22.value) {
+    const held = new Set();
+    for (const acc of res.value) {
       const info = acc.account.data.parsed?.info;
       const amount = Number(info?.tokenAmount?.uiAmount || 0);
       if (amount > 0 && info?.mint) held.add(info.mint);
     }
-  } catch (err) {
-    logger.warn("token-2022 accounts skip", { walletAddress, err: err.message });
-  }
-  return held;
+    try {
+      const t22 = await conn.getParsedTokenAccountsByOwner(owner, {
+        programId: new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"),
+      });
+      for (const acc of t22.value) {
+        const info = acc.account.data.parsed?.info;
+        const amount = Number(info?.tokenAmount?.uiAmount || 0);
+        if (amount > 0 && info?.mint) held.add(info.mint);
+      }
+    } catch (err) {
+      logger.warn("token-2022 accounts skip", { walletAddress, err: err.message });
+    }
+    return held;
+  });
 }
 
 async function scanKolHoldings(wallets) {
@@ -70,4 +61,4 @@ function matchKol(holdings, mint) {
   return hits;
 }
 
-module.exports = { getHeldMints, scanKolHoldings, matchKol, getConnection };
+module.exports = { getHeldMints, scanKolHoldings, matchKol, getConnection: rpc.getConnection };

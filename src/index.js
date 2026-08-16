@@ -6,6 +6,7 @@ const telegram = require("./services/telegram.service");
 const { startBot } = require("./bot");
 const { runScan } = require("./scanner");
 const lastScan = require("./state/lastScan.store");
+const rpc = require("./lib/rpc");
 
 const ONCE = process.argv.includes("--once");
 
@@ -32,6 +33,7 @@ async function cycle() {
 
 async function main() {
   lastScan.heartbeat();
+  logger.info("rpc endpoints", { urls: rpc.endpointList().map(rpc.label) });
 
   if (ONCE) {
     logger.info("single scan");
