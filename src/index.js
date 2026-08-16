@@ -70,17 +70,48 @@ async function main() {
   startBot();
 
   const expr = process.env.SCAN_CRON || "*/5 * * * *";
+  const timezone = resolveTimezone(process.env.SCAN_TIMEZONE);
   cron.schedule(
     expr,
     () => {
       cycle();
     },
-    { timezone: process.env.SCAN_TIMEZONE || "UTC" }
+    { timezone }
   );
-  logger.info(`cron scheduled ${expr}`);
+  logger.info(`cron scheduled ${expr}`, { timezone });
 
   // first pass shortly after boot so /pools has data
   setTimeout(() => cycle(), 3000);
+}
+
+const OFFSET_TZ = {
+  "UTC+7": "Asia/Jakarta",
+  "UTC-7": "America/Denver",
+  "GMT+7": "Asia/Jakarta",
+  "UTC+8": "Asia/Singapore",
+  "GMT+8": "Asia/Singapore",
+  "UTC+9": "Asia/Tokyo",
+  "GMT+9": "Asia/Tokyo",
+  WIB: "Asia/Jakarta",
+  WITA: "Asia/Makassar",
+  WIT: "Asia/Jayapura",
+};
+
+function isValidTimezone(tz) {
+  try {
+    Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveTimezone(raw) {
+  const input = String(raw || "UTC").trim();
+  const mapped = OFFSET_TZ[input.toUpperCase()] || OFFSET_TZ[input] || input;
+  if (isValidTimezone(mapped)) return mapped;
+  logger.warn(`invalid SCAN_TIMEZONE "${input}", falling back to UTC`);
+  return "UTC";
 }
 
 main().catch((err) => {
