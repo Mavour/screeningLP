@@ -1,8 +1,10 @@
 const { createClient } = require("../lib/http");
 const logger = require("../lib/logger");
 
+let disabledReason = null;
+
 function enabled() {
-  return Boolean(process.env.GMGN_API_KEY);
+  return Boolean(process.env.GMGN_API_KEY) && !disabledReason;
 }
 
 function client() {
@@ -21,6 +23,12 @@ async function getTokenInfo(mint) {
       address: mint,
     });
   } catch (err) {
+    const status = err.status || err.cause?.response?.status;
+    if (status === 401 || status === 403) {
+      disabledReason = status;
+      logger.warn("gmgn disabled for this process (no API access)", { status });
+      return null;
+    }
     logger.warn("gmgn skip", { mint, err: err.message });
     return null;
   }
