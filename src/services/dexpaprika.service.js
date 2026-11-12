@@ -3,7 +3,7 @@ const logger = require("../lib/logger");
 
 function headers() {
   const key = process.env.DEXPAPRIKA_API_KEY;
-  return key ? { Authorization: `Bearer ${key}` } : {};
+  return key ? { Authorization: key } : {};
 }
 
 function client() {
