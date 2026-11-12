@@ -5,7 +5,7 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function createClient({ baseURL, timeout = 20000, headers = {}, name = "http" }) {
+function createClient({ baseURL, timeout = 20000, headers = {}, name = "http", retryDelayMs = 400 }) {
   const client = axios.create({
     baseURL,
     timeout,
@@ -24,7 +24,7 @@ function createClient({ baseURL, timeout = 20000, headers = {}, name = "http" })
       const status = err.response?.status;
       const retryable = status === 429 || (status >= 500 && status < 600) || !status;
       if (retryable && attempt < 3) {
-        const delay = 400 * 2 ** (attempt - 1) + Math.floor(Math.random() * 200);
+        const delay = retryDelayMs * 2 ** (attempt - 1) + Math.floor(Math.random() * 200);
         logger.warn(`${name} retry ${attempt} after ${delay}ms`, {
           url: config.url,
           status: status || err.code,

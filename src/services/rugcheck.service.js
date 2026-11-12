@@ -1,20 +1,36 @@
-const { createClient } = require("../lib/http");
+const { createClient, sleep } = require("../lib/http");
 const logger = require("../lib/logger");
+
+// Public API: at most one request per second, including concurrent scans/retries.
+const PUBLIC_INTERVAL_MS = 1100;
+let publicQueue = Promise.resolve();
+let nextPublicAt = 0;
 
 function client() {
   const headers = {};
-  if (process.env.RUGCHECK_API_KEY) {
-    headers["X-API-KEY"] = process.env.RUGCHECK_API_KEY;
-  }
+  const key = process.env.RUGCHECK_API_KEY?.trim();
+  if (key) headers["X-API-KEY"] = key;
   return createClient({
     baseURL: process.env.RUGCHECK_URL || "https://api.rugcheck.xyz",
     name: "rugcheck",
     headers,
+    retryDelayMs: key ? 400 : PUBLIC_INTERVAL_MS,
   });
 }
 
 async function getReport(mint) {
-  return client().get(`/v1/tokens/${mint}/report`);
+  if (process.env.RUGCHECK_API_KEY?.trim()) return client().get(`/v1/tokens/${mint}/report`);
+  const request = publicQueue.then(async () => {
+    await sleep(Math.max(0, nextPublicAt - Date.now()));
+    try {
+      return await client().get(`/v1/tokens/${mint}/report`);
+    } finally {
+      nextPublicAt = Date.now() + PUBLIC_INTERVAL_MS;
+    }
+  });
+  // A failed report must not block the next token in the queue.
+  publicQueue = request.catch(() => {});
+  return request;
 }
 
 function summarize(report) {
