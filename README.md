@@ -108,3 +108,90 @@ src/
 config/         default threshold + seed KOL
 data/           runtime state (gitignored)
 ```
+
+
+## Agent Dorm: API status baca-saja
+
+API ikut berjalan lewat npm start / npm run bot / PM2. Default HTTP:
+127.0.0.1:9001. Port ini berbeda dari API ExitBot (9000). Mode --once tetap
+hanya scan sekali, tanpa membuka server HTTP. Tidak ada dependency baru.
+
+Konfigurasi opsional di .env:
+
+```env
+STATUS_API_ENABLED=true
+STATUS_API_HOST=127.0.0.1
+STATUS_API_PORT=9001
+STATUS_API_KEY=
+STATUS_API_DAY_TIMEZONE=Asia/Makassar
+STATUS_API_SCAN_STALE_AFTER_SEC=1200
+```
+
+- GET /status mengirim envelope agentId=alert untuk Bot Alert di Agent Dorm.
+  HTTP 200 juga untuk warn/error/offline; baca field status.
+- GET /health memberi HTTP 200 jika status ok, selain itu 503.
+- Jika STATUS_API_KEY diisi, kedua endpoint memakai Authorization: Bearer <key>.
+- Bind selain loopback ditolak tanpa key. Gunakan SSH tunnel atau reverse proxy
+  HTTPS untuk lintas mesin; jangan kirim Bearer key lewat internet HTTP.
+- Tidak ada endpoint scan, pause/resume, ubah threshold, kirim Telegram, atau
+  transaksi. HTTP GET membaca hasil scan tersimpan dan state proses.
+- STATUS_API_ENABLED=false menonaktifkan server. API tidak mengubah threshold,
+  perhitungan risiko, jadwal scan, atau daftar pool yang lolos.
+
+Uji tanpa menjalankan scanner atau Telegram:
+
+```bash
+npm test
+```
+
+Setelah bot dijalankan, coba GET http://127.0.0.1:9001/status. Untuk key,
+sertakan header Authorization: Bearer <STATUS_API_KEY>.
+
+Konfigurasi Agent Dorm pada tahap penyambungan nanti:
+
+```env
+ALERT_MODE=http
+ALERT_URL=http://127.0.0.1:9001
+ALERT_API_KEY=
+ALERT_POLL_MS=5000
+```
+
+### Arti data
+
+- metrics.candidates maksimal 12, diurutkan menurut score menurun. ID memakai
+  alamat pool yang stabil, bukan waktu request. events=[] agar Dorm tidak
+  membuat coin_found ganda untuk polling kandidat yang sama.
+- Skor asli scanner adalah **risiko: kecil lebih baik**. API mempertahankannya
+  di riskScore, lalu mengirim score=100-riskScore agar cocok dengan arah skor
+  tampilan Dorm. riskCategory tetap kategori asli, bukan jaminan aman.
+  safetyAssessmentComplete=false: skor heuristik ini bukan audit rug lengkap.
+- passedFilters mencakup semua pool lolos dari scan terakhir, bukan hanya 12
+  kartu API. scannedLastCycle adalah jumlah yang di-enrich pada siklus itu.
+- scannedToday dihitung dari siklus baru dan disimpan di data/last-scan.json.
+  Tidak menebak total harian dari satu scan lama. Sebelum pencatatan dimulai
+  nilainya null; hari pertama ditandai dailyCountComplete=false. Counter
+  memakai STATUS_API_DAY_TIMEZONE (UTC jika tidak diisi), terpisah dari zona cron.
+- lastScanAt adalah waktu scan berhasil. Scan gagal mempertahankan kandidat dan
+  waktu sukses sebelumnya, menambahkan lastAttemptAt dan peringatan. Pause
+  tetap terlihat, termasuk jika scan manual selesai setelah pengguna menekan pause.
+- updatedAt berasal dari heartbeat proses tiap 30 detik; membaca API tidak
+  menyegarkannya. Ini mencegah scan 5 menit dianggap offline oleh timeout 120
+  detik Dorm. Umur hasil scan tetap diperiksa terpisah (default 1200 detik).
+  Sesuaikan STATUS_API_SCAN_STALE_AFTER_SEC bila cron berjalan lebih jarang.
+- foundAt bertahan selama pool terus muncul dalam hasil, termasuk sesudah
+  restart, karena disimpan bersama compactResult.
+- priceUsd/FDV dari DexScreener hanya dipakai bila chain Solana dan base mint
+  cocok. Fallback harga DexPaprika hanya untuk sumber token yang tepat.
+  **Market cap tidak digunakan sebagai FDV**. Nilai tak diketahui adalah null.
+- estFeeAprPct adalah estimasi laju fee pool: fees24h / TVL * 365 * 100,
+  bukan janji hasil posisi LP. Hanya dihitung untuk discovery timeframe 24h
+  dengan data fee valid; timeframe lain atau data hilang memakai null.
+- maxFdvUsd=0 dengan fdvFilterEnabled=false berarti scanner tidak memakai
+  batas FDV. Filter lain mengikuti konfigurasi aktif asli, termasuk batas
+  holder/risk/usia yang bisa diubah lewat Telegram. Tidak ada rug-check tambahan
+  atau ambang baru yang dipaksakan oleh API ini.
+
+Sebelum menghubungkan UI Dorm, tangani nilai null (harga/FDV/APR/lastScanAt),
+label arah skor risiko, flag FDV nonaktif, dan kelengkapan counter harian.
+UI dummy lama belum membedakan seluruh metadata tersebut. Bot belum
+otomatis dijalankan/restart dan konfigurasi Dorm belum diganti ke mode HTTP.

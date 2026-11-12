@@ -17,10 +17,13 @@ async function bestPairLiquidity(mint, poolAddress) {
   try {
     const pairs = await getTokenPairs(mint);
     const match = pairs.find((p) => p.pairAddress === poolAddress) || pairs[0];
+    const correctBase = match?.chainId === "solana" && match?.baseToken?.address === mint;
     return {
       liquidityUsd: num(match?.liquidity?.usd),
       url: match?.url,
       pairAddress: match?.pairAddress,
+      priceUsd: correctBase && match.priceUsd != null ? num(match.priceUsd) : null,
+      fdvUsd: correctBase && match.fdv != null ? num(match.fdv) : null,
     };
   } catch (err) {
     logger.warn("dexscreener skip", { mint, err: err.message });

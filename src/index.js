@@ -7,8 +7,40 @@ const { startBot } = require("./bot");
 const { runScan } = require("./scanner");
 const lastScan = require("./state/lastScan.store");
 const rpc = require("./lib/rpc");
+const userConfig = require("./state/userConfig.store");
+const runtime = require("./status-runtime");
+const { readOptions, buildSnapshot, startStatusApi } = require("./status-api");
 
 const ONCE = process.argv.includes("--once");
+
+async function startDashboardApi() {
+  const options = readOptions();
+  if (!options.enabled) return;
+  try {
+    runtime.heartbeat();
+    const server = await startStatusApi(options, () => buildSnapshot({
+      scan: lastScan.load(),
+      config: userConfig.load(),
+      runtime: runtime.get(),
+      dayTimeZone: options.dayTimeZone,
+      scanStaleAfterSec: options.scanStaleAfterSec,
+    }));
+    const heartbeat = setInterval(runtime.heartbeat, 30000);
+    heartbeat.unref();
+    server.on("error", (err) => logger.error("status API server error", { code: err.code || "UNKNOWN" }));
+    const stop = () => {
+      runtime.stopping();
+      clearInterval(heartbeat);
+      server.close(() => process.exit(0));
+      setTimeout(() => process.exit(0), 2000).unref();
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    logger.info("read-only status API listening", { host: options.host, port: options.port });
+  } catch (err) {
+    logger.error("status API failed to start; scanner continues", { code: err.code || "CONFIG" });
+  }
+}
 
 async function cycle() {
   try {
@@ -67,6 +99,7 @@ async function main() {
     process.exit(1);
   }
 
+  await startDashboardApi();
   startBot();
 
   const expr = process.env.SCAN_CRON || "*/5 * * * *";

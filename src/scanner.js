@@ -12,6 +12,7 @@ const userConfig = require("./state/userConfig.store");
 const seenPools = require("./state/seenPools.store");
 const lastScan = require("./state/lastScan.store");
 const kolWallets = require("./state/kolWallets.store");
+const runtime = require("./status-runtime");
 
 function buildToken(rawPool, paprika, rug, dex, gmgnInfo, kol) {
   const pool = meteora.normalizePool(rawPool);
@@ -40,6 +41,8 @@ function buildToken(rawPool, paprika, rug, dex, gmgnInfo, kol) {
     symbol: base?.symbol || pool.name,
     tokenName: base?.name || pool.name,
     quoteSymbol: quote?.symbol || "",
+    priceUsd: dex?.priceUsd > 0 ? dex.priceUsd : paprika?.source === "token" && paprika.lastPriceUsd > 0 ? paprika.lastPriceUsd : null,
+    fdvUsd: dex?.fdvUsd > 0 ? dex.fdvUsd : null,
     hasMintAuthority: !!base?.has_mint_authority,
     hasFreezeAuthority: !!base?.has_freeze_authority,
     tokenAgeMinutes,
@@ -80,7 +83,7 @@ async function enrichOne(raw, kolHoldings) {
   return buildToken(raw, paprika, rug, dex, gmgnInfo, kol);
 }
 
-async function runScan({ alert = true, force = false } = {}) {
+async function scanCycle({ alert = true, force = false } = {}) {
   const started = Date.now();
   const config = userConfig.load();
   const status = lastScan.load();
@@ -103,11 +106,6 @@ async function runScan({ alert = true, force = false } = {}) {
     pools = await meteora.fetchDiscoveryPools(config);
   } catch (err) {
     logger.error("discovery failed", { err: err.message });
-    lastScan.save({
-      ...lastScan.load(),
-      at: new Date().toISOString(),
-      errors: 1,
-    });
     throw err;
   }
 
@@ -155,10 +153,11 @@ async function runScan({ alert = true, force = false } = {}) {
     rejected,
     rejectReasons,
     errors,
+    discoveryTimeframe: config.discoveryTimeframe || "24h",
     ms: Date.now() - started,
     recommended: recommended.map(compactResult),
   };
-  lastScan.save(summary);
+  lastScan.completeScan(summary, process.env.STATUS_API_DAY_TIMEZONE || "UTC");
   logger.info("scan done", {
     scanned,
     recommended: recommended.length,
@@ -177,13 +176,18 @@ function compactResult({ token, verdict }) {
     mint: token.mint,
     name: token.name,
     symbol: token.symbol,
+    quoteSymbol: token.quoteSymbol,
+    priceUsd: token.priceUsd,
+    fdvUsd: token.fdvUsd,
     poolType: token.poolType,
     marketCap: token.marketCap,
     tvl: token.tvl,
     activeTvl: token.activeTvl,
     volumes: token.volumes,
     volume24h: token.volume24h,
+    volume24hKnown: token.raw?.volume != null,
     fees24h: token.fees24h,
+    fees24hKnown: token.raw?.fee != null,
     feeTvlRatio: token.feeTvlRatio,
     totalLps: token.totalLps,
     uniqueLps: token.uniqueLps,
@@ -204,6 +208,18 @@ function compactResult({ token, verdict }) {
     paprikaUrl: token.paprikaUrl,
     gmgnUrl: token.gmgnUrl,
   };
+}
+
+async function runScan(options = {}) {
+  runtime.scanStarted();
+  try {
+    return await scanCycle(options);
+  } catch (err) {
+    try { lastScan.failScan(); } catch { /* keep the original scan failure */ }
+    throw err;
+  } finally {
+    runtime.scanFinished();
+  }
 }
 
 module.exports = { runScan, enrichOne, compactResult };
