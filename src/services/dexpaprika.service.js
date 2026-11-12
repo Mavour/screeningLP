@@ -1,30 +1,49 @@
-const { createClient } = require("../lib/http");
+const { createClient, sleep } = require("../lib/http");
 const logger = require("../lib/logger");
 
+let requestQueue = Promise.resolve();
+let lastFinishedAt = 0;
+
 function headers() {
-  const key = process.env.DEXPAPRIKA_API_KEY;
+  const key = process.env.DEXPAPRIKA_API_KEY?.trim();
   return key ? { Authorization: key } : {};
 }
 
-function client() {
+function client(intervalMs) {
   return createClient({
     baseURL: process.env.DEXPAPRIKA_URL || "https://api.dexpaprika.com",
     name: "dexpaprika",
     headers: headers(),
+    retryDelayMs: intervalMs,
   });
 }
 
+function request(url, params) {
+  const pending = requestQueue.then(async () => {
+    // Free: 30 requests/min with a key, 15/min without one. Include retries.
+    const intervalMs = process.env.DEXPAPRIKA_API_KEY?.trim() ? 2100 : 4100;
+    await sleep(Math.max(0, lastFinishedAt + intervalMs - Date.now()));
+    try {
+      return await client(intervalMs).get(url, params);
+    } finally {
+      lastFinishedAt = Date.now();
+    }
+  });
+  requestQueue = pending.catch(() => {});
+  return pending;
+}
+
 async function getPool(poolAddress) {
-  return client().get(`/networks/solana/pools/${poolAddress}`);
+  return request(`/networks/solana/pools/${poolAddress}`);
 }
 
 async function getToken(mint) {
-  return client().get(`/networks/solana/tokens/${mint}`);
+  return request(`/networks/solana/tokens/${mint}`);
 }
 
 async function getOhlcv(poolAddress, { start, interval = "1h", limit = 24 } = {}) {
   const startIso = start || new Date(Date.now() - 24 * 3600 * 1000).toISOString();
-  return client().get(`/networks/solana/pools/${poolAddress}/ohlcv`, {
+  return request(`/networks/solana/pools/${poolAddress}/ohlcv`, {
     start: startIso,
     interval,
     limit,

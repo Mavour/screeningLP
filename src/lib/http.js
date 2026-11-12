@@ -22,9 +22,13 @@ function createClient({ baseURL, timeout = 20000, headers = {}, name = "http", r
       return res.data;
     } catch (err) {
       const status = err.response?.status;
+      const retryAfter = err.response?.headers?.["retry-after"];
+      const seconds = retryAfter == null ? NaN : Number(retryAfter);
+      const until = Number.isFinite(seconds) ? Date.now() + seconds * 1000 : Date.parse(retryAfter);
+      const retryAfterMs = status === 429 && Number.isFinite(until) ? Math.max(0, until - Date.now()) : 0;
       const retryable = status === 429 || (status >= 500 && status < 600) || !status;
       if (retryable && attempt < 3) {
-        const delay = retryDelayMs * 2 ** (attempt - 1) + Math.floor(Math.random() * 200);
+        const delay = Math.max(retryAfterMs, retryDelayMs * 2 ** (attempt - 1) + Math.floor(Math.random() * 200));
         logger.warn(`${name} retry ${attempt} after ${delay}ms`, {
           url: config.url,
           status: status || err.code,
@@ -32,6 +36,9 @@ function createClient({ baseURL, timeout = 20000, headers = {}, name = "http", r
         await sleep(delay);
         return request(config, attempt + 1);
       }
+      // Queued callers may move to a fallback after this failure. Respect the
+      // server cooldown even when the final retry has already been consumed.
+      if (retryAfterMs > 0) await sleep(retryAfterMs);
       const message = err.response?.data?.message || err.message;
       const wrapped = new Error(`${name} ${config.method || "GET"} ${config.url} failed: ${message}`);
       wrapped.status = status;
