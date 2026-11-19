@@ -10,7 +10,7 @@ import { getMeta, latestPools, publicActivity, scheduleWallet } from '../db.js';
 import { trending, whalePools } from '../intel/pools.js';
 import { isAddress, isSignature } from '../strategy/instructions.js';
 import { smartLpStatus } from '../discovery/smart-lp.js';
-import { publicSmartLpReport } from '../discovery/public-leaderboard.js';
+import { publicSmartLpReport, resetSmartLpFavorite } from '../discovery/public-leaderboard.js';
 import { agentDormSnapshot, publicHealth, radarReport } from '../radar-report.js';
 import { enqueue, webhookSignatures } from '../realtime/worker.js';
 
@@ -204,16 +204,21 @@ function evidencePanels(db, req, address) {
 
 function smartLeaderboard(db, req) {
   if (req.publicMode) {
-    const { health, leaderboardAt, wallets } = publicSmartLpReport(db);
+    const { health, leaderboardAt, wallets, favorites } = publicSmartLpReport(db);
     const coverage = health ? num(health.measured) + ' / ' + num(health.candidates) + ' wallets measured · ' +
       num(health.incomplete) + ' incomplete · ' + num(health.eligible) + ' eligible · scan ' + raw(health.state) :
       'Waiting for the first Smart LP scan';
-    return '<p class="source-note">Radar ranks the sampled Solana wallets using closed-position PnL from Meteora. ' +
+    const favoriteStatus = { queued: 'Queued for evaluation', history_unavailable: 'History unavailable · will retry',
+      did_not_qualify: 'Ranking criteria not met', eligible: 'Eligible · unranked' };
+    const favoriteRows = favorites.map(row => [linkWallet(row.wallet, req), favoriteStatus[row.status]]);
+    return '<p class="source-note">Radar ranks Solana wallets using closed-position PnL from Meteora. ' +
       'Each ranked candidate is evaluated on a separate follow-up period.</p>' +
       '<p class="source-note">' + coverage + (health ? ' · ' + num(health.windowDays) + ' days · minimum ' +
         num(health.minClosed) + ' closes' : '') + ' · ranked ' + when(leaderboardAt) + '</p>' +
+      (favoriteRows.length ? panel('Favorite wallets', '', table(['Wallet', 'Smart LP screening'], favoriteRows)) : '') +
       table(['Wallet','Radar rank','Score','Realized PnL','ROI','Win rate','Closed','Smart LP status'], wallets.map(row =>
-        [linkWallet(row.wallet, req, 'closed'), num(row.rank), num(row.score), money(req, db, row.pnlSol, null, true),
+        [linkWallet(row.wallet, req, 'closed') + (row.favorite ? ' <span title="Favorite">★</span>' : ''),
+          num(row.rank), num(row.score), money(req, db, row.pnlSol, null, true),
           pct(row.roi * 100), pct(row.winRate * 100), num(row.closedPositions), verificationLabel(row)]));
   }
   const rows = db.prepare(`SELECT * FROM wallets WHERE is_blacklisted=0 AND (current_rank IS NOT NULL OR
@@ -628,7 +633,7 @@ export function createWeb({ db, settings, tools }) {
   });
   app.get('/web/wallets/:address', (req, reply) => {
     const w = db.prepare('SELECT * FROM wallets WHERE address=?').get(req.params.address);
-    if (!w || (req.publicMode && !isPublicCandidate(db, w) &&
+    if (!w || (req.publicMode && !isPublicCandidate(db, w) && !(w.is_favorite && !w.is_blacklisted) &&
       !db.prepare('SELECT 1 FROM whale_deposits WHERE wallet=? LIMIT 1').get(w.address) &&
       (w.is_blacklisted || !db.prepare(`SELECT 1 FROM public_activity_events
         WHERE json_extract(detail,'$.wallet')=? LIMIT 1`).get(w.address)))) {
@@ -647,7 +652,10 @@ export function createWeb({ db, settings, tools }) {
     const updated = db.transaction(() => {
       const result = db.prepare('UPDATE wallets SET note=?,tags=?,is_favorite=?,is_blacklisted=? WHERE address=?')
         .run(body.note.trim(), body.tags.trim(), Number(body.favorite === '1'), Number(body.blacklist === '1'), address);
-      if (result.changes && body.favorite === '1') scheduleWallet(db, address, Date.now());
+      if (result.changes) {
+        if (body.favorite === '1' && body.blacklist !== '1') scheduleWallet(db, address, Date.now());
+        else if (req.publicMode) resetSmartLpFavorite(db, address);
+      }
       return result.changes;
     }).immediate();
     return updated ? reply.code(303).header('location', '/web/wallets/' + address).send() : reply.code(404).send('Wallet not found');

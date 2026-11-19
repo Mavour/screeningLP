@@ -8,7 +8,7 @@ import { WebSocketServer } from 'ws';
 import { config, DAY, SOL } from '../src/config.js';
 import { openDb, getMeta, leaderboard, publicActivity, savePosition, savePublicPosition, setMeta, snapshot } from '../src/db.js';
 import { discover, scoreWallets, summarize, verification } from '../src/discovery/leaderboard.js';
-import { discoverPublicSmartLp } from '../src/discovery/public-leaderboard.js';
+import { discoverPublicSmartLp, hasPendingSmartLpFavorites, publicSmartLpReport } from '../src/discovery/public-leaderboard.js';
 import { evaluateCohort, evaluateEvidence, holdBenchmark, smartLpStatus } from '../src/discovery/smart-lp.js';
 import { distribution, binPrice, mergeLabels } from '../src/strategy/distribution.js';
 import { DLMM, PROGRAM, openingRebalance, parsePositions } from '../src/strategy/instructions.js';
@@ -348,6 +348,37 @@ describe('realtime', () => {
 });
 
 describe('dashboard and intelligence', () => {
+  it('queues a saved favorite, reports failed screening, and ranks it only when eligible', async () => {
+    const ctx = fixture(':memory:', { webPassword: await bcrypt.hash('private', 4), candidates: 1 });
+    await refreshWallet(ctx, mockWallet);
+    setMeta(ctx.db, 'public_worker_started_at', ctx.now);
+    const app = createWeb(ctx);
+    cleanups.push(() => app.close());
+    const headers = { authorization: 'Basic ' + Buffer.from('mock:private').toString('base64') };
+    const profile = '/web/wallets/' + mockWallet;
+    const csrf = (await app.inject({ url: profile, headers })).body.match(/name="csrf" value="([a-f0-9]+)"/)[1];
+    const saved = await app.inject({ method: 'POST', url: profile,
+      headers: { ...headers, 'content-type': 'application/x-www-form-urlencoded' },
+      payload: new URLSearchParams({ csrf, note: '', tags: '', favorite: '1' }).toString() });
+    expect(saved.statusCode).toBe(303);
+    expect(hasPendingSmartLpFavorites(ctx.db)).toBe(true);
+    const dashboard = async () => (await app.inject({ url: '/web/leaderboard', headers })).body;
+    expect(await dashboard()).toContain('Queued for evaluation');
+    setMeta(ctx.db, 'public_sample_owners', JSON.stringify([mockPool]));
+    const closedPositions = ctx.providers.closedPositions;
+    ctx.providers.closedPositions = vi.fn(async () => []);
+    await discoverPublicSmartLp(ctx, ctx.now);
+    expect(ctx.providers.closedPositions).toHaveBeenCalledExactlyOnceWith(mockWallet, ctx.now - ctx.settings.windowDays * DAY);
+    expect(hasPendingSmartLpFavorites(ctx.db)).toBe(false);
+    expect(await dashboard()).toContain('Ranking criteria not met');
+    expect(leaderboard(ctx.db)).toHaveLength(0);
+    ctx.providers.closedPositions = closedPositions;
+    await discoverPublicSmartLp(ctx, ctx.now);
+    expect(publicSmartLpReport(ctx.db)).toMatchObject({ favorites: [],
+      wallets: [{ wallet: mockWallet, rank: 1, favorite: true, status: 'pending' }] });
+    expect((await dashboard()).split('data-copy="' + mockWallet + '"')).toHaveLength(2);
+  });
+
   it('delivers an eligible durable opening even after the live wallet sample changes', async () => {
     const ctx = fixture();
     await discover(ctx);

@@ -1,7 +1,7 @@
 import pino from 'pino';
 import { config, finite } from './config.js';
 import { getMeta, openDb, setMeta } from './db.js';
-import { discoverPublicSmartLp, publicHistoryProviders } from './discovery/public-leaderboard.js';
+import { discoverPublicSmartLp, hasPendingSmartLpFavorites, publicHistoryProviders } from './discovery/public-leaderboard.js';
 import { summarize, verification } from './discovery/leaderboard.js';
 import { evaluateCohort } from './discovery/smart-lp.js';
 import { assertPublicDatabase, publicDatabasePath, publicStreamProviders, refreshPublicMarket, refreshPublicSnapshot } from './public-snapshot.js';
@@ -115,7 +115,8 @@ async function start() {
   });
   let lastSmartScan = 0;
   schedule('Smart LP discovery', 60000, async () => {
-    if (!getMeta(db, 'public_sample_owners') || Date.now() - lastSmartScan < settings.discoveryMs) return;
+    const favoriteQueued = hasPendingSmartLpFavorites(db);
+    if (!favoriteQueued && Date.now() - lastSmartScan < settings.discoveryMs) return;
     const result = await discoverPublicSmartLp(smartContext);
     if (result) lastSmartScan = result.finishedAt;
   }, 5000);

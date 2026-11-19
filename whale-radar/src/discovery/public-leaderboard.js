@@ -9,6 +9,22 @@ import { smartLpStatus } from './smart-lp.js';
 
 const endpoint = 'https://dlmm.datapi.meteora.ag';
 const emptyActivity = new Map();
+const favoriteCheckPrefix = 'public_smart_lp_favorite:';
+
+function favoriteWallets(db) {
+  return db.prepare(`SELECT w.address, m.value AS outcome FROM wallets w
+    LEFT JOIN metadata m ON m.key=? || w.address
+    WHERE w.is_favorite=1 AND w.is_blacklisted=0 ORDER BY w.address`).all(favoriteCheckPrefix)
+    .filter(row => isAddress(row.address));
+}
+
+export function hasPendingSmartLpFavorites(db) {
+  return favoriteWallets(db).some(row => row.outcome == null);
+}
+
+export function resetSmartLpFavorite(db, address) {
+  db.prepare('DELETE FROM metadata WHERE key=?').run(favoriteCheckPrefix + address);
+}
 
 export function publicHistoryProviders(settings, logger, signal, stream) {
   const { candles, positionEvents } = createProviders(settings, logger, signal);
@@ -63,11 +79,12 @@ export function publicHistoryProviders(settings, logger, signal, stream) {
 
 export async function discoverPublicSmartLp({ db, settings, providers, logger, signal }, now = Date.now()) {
   const sampled = JSON.parse(getMeta(db, 'public_sample_owners') ?? '[]');
-  const profileSeeds = db.prepare(`SELECT address FROM wallets WHERE is_favorite=1 OR current_rank IS NOT NULL
+  const favorites = new Set(favoriteWallets(db).map(row => row.address));
+  const profileSeeds = db.prepare(`SELECT address FROM wallets WHERE current_rank IS NOT NULL
     UNION SELECT wallet AS address FROM whale_deposits`).all().map(row => row.address);
   const blocked = new Set(db.prepare('SELECT address FROM wallets WHERE is_blacklisted=1').pluck().all());
-  const candidates = [...new Set([...profileSeeds, ...sampled])]
-    .filter(address => isAddress(address) && !blocked.has(address)).slice(0, settings.candidates);
+  const candidates = [...new Set([...favorites, ...profileSeeds, ...sampled])]
+    .filter(address => isAddress(address) && !blocked.has(address)).slice(0, Math.max(settings.candidates, favorites.size));
   if (!candidates.length) return;
   const source = 'Meteora DLMM Data API';
   const health = { source, windowDays: settings.windowDays, minClosed: settings.minClosed,
@@ -101,6 +118,13 @@ export async function discoverPublicSmartLp({ db, settings, providers, logger, s
   const report = { ...health, measured, incomplete: failures.length, eligible: eligible.length, finishedAt: Date.now(),
     state: retained ? 'retained' : failures.length ? 'partial' : 'complete' };
   db.transaction(() => {
+    const currentFavorites = new Set(favoriteWallets(db).map(row => row.address));
+    for (const [index, address] of candidates.entries()) {
+      if (!favorites.has(address) || !currentFavorites.has(address)) continue;
+      const result = results[index];
+      const outcome = result.error ? 'history_unavailable' : result.value ? 'eligible' : 'did_not_qualify';
+      setMeta(db, favoriteCheckPrefix + address, outcome);
+    }
     if (!retained) {
       replaceLeaderboard(db, top, now);
       for (const row of top) {
@@ -116,9 +140,14 @@ export async function discoverPublicSmartLp({ db, settings, providers, logger, s
 
 export function publicSmartLpReport(db, now = Date.now()) {
   const health = JSON.parse(getMeta(db, 'public_smart_lp_health') ?? 'null');
+  const ranked = leaderboard(db);
+  const rankedAddresses = new Set(ranked.map(row => row.address));
   return { health, leaderboardAt: Number(getMeta(db, 'leaderboard_at')) || null,
-    wallets: leaderboard(db).map(row => ({
+    favorites: favoriteWallets(db).filter(row => !rankedAddresses.has(row.address))
+      .map(row => ({ wallet: row.address, status: row.outcome ?? 'queued' })),
+    wallets: ranked.map(row => ({
       wallet: row.address, rank: row.current_rank, score: row.score, pnlSol: row.realized_pnl_sol, roi: row.roi,
-      winRate: row.win_rate, closedPositions: row.n_closed, status: smartLpStatus(db, row.address, now).status,
+      winRate: row.win_rate, closedPositions: row.n_closed, favorite: Boolean(row.is_favorite),
+      status: smartLpStatus(db, row.address, now).status,
     })) };
 }
