@@ -1,10 +1,11 @@
 import { readFileSync } from 'node:fs';
-import { BorshInstructionCoder, BN } from '@coral-xyz/anchor';
+import anchor from '@coral-xyz/anchor';
 import bs58 from 'bs58';
 import { SOL, USDC, DAY } from '../config.js';
 import { IDL, PROGRAM } from '../strategy/instructions.js';
 import { normalizeLpPosition, normalizePool } from './providers.js';
 
+const { BN, BorshInstructionCoder } = anchor;
 const scenario = JSON.parse(readFileSync(new URL('../../fixtures/scenario.json', import.meta.url)));
 const address = (number, suffix = 0) => {
   const b = Buffer.alloc(32, number);

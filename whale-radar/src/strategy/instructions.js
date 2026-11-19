@@ -1,9 +1,11 @@
 import { createRequire } from 'node:module';
-import { BN, BorshAccountsCoder, BorshInstructionCoder } from '@coral-xyz/anchor';
+import anchor from '@coral-xyz/anchor';
 import bs58 from 'bs58';
 import { mergeLabels } from './distribution.js';
 
 const require = createRequire(import.meta.url);
+// Anchor exposes BN through its CommonJS object, which Node may not detect as a named export.
+const { BN, BorshAccountsCoder, BorshInstructionCoder } = anchor;
 // The SDK's CJS entry works under Node 20+ without its extensionless ESM imports.
 export const DLMM = require('@meteora-ag/dlmm');
 export const { IDL } = DLMM;
