@@ -23,6 +23,8 @@ curl -fsS -u radar http://127.0.0.1:9011/web/public-status
 
 Radar tetap mendengarkan di `127.0.0.1:9011`. Gunakan Nginx untuk menyajikan `https://VPS_IP:9443/web`. Gunakan port 9443 yang kosong dan izinkan TCP 9443 di firewall VPS serta firewall cloud. Ganti `VPS_IP` dengan alamat publik VPS pada contoh berikut.
 
+Jika Nginx dan Certbot 5.4+ sudah terpasang, jalankan `bash whale-radar/docs/setup-ip-https.sh VPS_IP` dari folder `screeningLP`. Skrip menguji konfigurasi Nginx, meminta sertifikat, dan memeriksa respons HTTPS. Panduan manual di bawah bisa dipakai jika sudah ada konfigurasi Nginx untuk IP yang sama.
+
 ### 1. Siapkan validasi sertifikat
 
 Gunakan [Certbot 5.4 atau lebih baru](https://letsencrypt.org/2026/03/11/shorter-certs-certbot) dan Nginx. Buat direktori challenge di VPS:
