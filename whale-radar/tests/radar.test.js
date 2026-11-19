@@ -351,6 +351,7 @@ describe('dashboard and intelligence', () => {
   it('delivers an eligible durable opening even after the live wallet sample changes', async () => {
     const ctx = fixture();
     await discover(ctx);
+    snapshot(ctx.db, { address: mockPool, name: 'FIONA-SOL', tokenX: SOL, tokenY: mockPosition }, ctx.now);
     const env = { RADAR_PUBLIC_TELEGRAM: '1', TELEGRAM_BOT_TOKEN: 'test-token', ALLOWED_CHAT_ID: '42',
       RADAR_PUBLIC_URL: 'https://192.0.2.10:9443' };
     const send = vi.fn(async () => new Response(JSON.stringify({ ok: true })));
@@ -367,7 +368,21 @@ describe('dashboard and intelligence', () => {
     const message = JSON.parse(send.mock.calls[0][1].body);
     expect(message).toMatchObject({ chat_id: '42', text: expect.stringContaining('US$2,500') });
     expect(message.reply_markup.inline_keyboard[0][2].url).toBe('https://192.0.2.10:9443/web/wallets/' + mockWallet);
+    expect(message.reply_markup.inline_keyboard[1]).toEqual([{ text: 'Copy CA', copy_text: { text: mockPosition } }]);
     expect(publicHealth(ctx.db).telegram).toMatchObject({ state: 'enabled', lastDeliveredAt: expect.any(Number) });
+  });
+
+  it('offers a separate copy button for each token in a pair without a quote mint', () => {
+    const report = { thresholdUsd: 2000, source: 'test' };
+    const event = { wallet: mockWallet, pool: { tokens: [
+      { mint: mockPosition, symbol: 'AAA', side: 'X' }, { mint: mockPool, symbol: 'BBB', side: 'Y' },
+    ] } };
+    const message = publicTelegramMessage(event, report);
+    expect(message.reply_markup.inline_keyboard[0]).toHaveLength(2);
+    expect(message.reply_markup.inline_keyboard[1]).toEqual([
+      { text: 'Copy CA · AAA', copy_text: { text: mockPosition } },
+      { text: 'Copy CA · BBB', copy_text: { text: mockPool } },
+    ]);
   });
 
   it('uses an archived opening instruction when the current position has no funded bins', async () => {

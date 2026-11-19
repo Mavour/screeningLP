@@ -3,6 +3,7 @@ import { getMeta, latestPools, publicActivity } from './db.js';
 import { whalePools } from './intel/pools.js';
 import { publicSmartLpReport } from './discovery/public-leaderboard.js';
 import { smartLpStatus } from './discovery/smart-lp.js';
+import { isAddress } from './strategy/instructions.js';
 
 const iso = value => value > 0 ? new Date(value).toISOString() : null;
 const numeric = value => Number.isFinite(value) ? value : null;
@@ -54,8 +55,13 @@ export function radarReport(db, now = Date.now()) {
     const whales = whalePools(db);
     const marketFacts = (address, row) => {
       const stats = details.get(address);
+      const tokens = ['X', 'Y'].map(side => {
+        const mint = stats?.['token' + side];
+        const symbol = stats?.['token' + side + 'Symbol'] ?? (mint === stats?.tokenMint ? stats?.tokenSymbol : null);
+        return { mint, symbol: symbol ?? null, side };
+      }).filter(token => isAddress(token.mint));
       return {
-        poolAddress: address, pair: stats?.name || row?.name || address,
+        poolAddress: address, pair: stats?.name || row?.name || address, tokens,
         whaleWallets: row?.count ?? 0, depositUsd: row?.depositUsd ?? 0, binStep: numeric(stats?.binStep),
         baseFeePct: numeric(stats?.baseFeePct), dynamicFeePct: numeric(stats?.dynamicFeePct),
         tvlUsd: numeric(stats?.tvl), volume24hUsd: numeric(stats?.volume24), fdvUsd: numeric(stats?.fdv),

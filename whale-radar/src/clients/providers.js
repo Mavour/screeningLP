@@ -49,6 +49,7 @@ export function normalizePool(row) {
   if (token?.freeze_authority_disabled === false) risks.push('Freeze authority');
   return {
     address: row.address, name: row.name, tokenMint: token?.address, tokenX: x?.address, tokenY: y?.address,
+    tokenXSymbol: x?.symbol, tokenYSymbol: y?.symbol,
     decimalsX: finite(x?.decimals), decimalsY: finite(y?.decimals), tvl, fees1, fees24,
     volume1: finite(row.volume?.['1h']), volume24: finite(row.volume?.['24h']),
     feeTvl: tvl > 0 && fees24 != null ? fees24 / tvl : null,

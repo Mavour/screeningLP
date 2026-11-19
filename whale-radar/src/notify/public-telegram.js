@@ -1,5 +1,5 @@
 import { pathToFileURL } from 'node:url';
-import { WHALE_DEPOSIT_USD, config } from '../config.js';
+import { SOL, USDC, WHALE_DEPOSIT_USD, config } from '../config.js';
 import { http } from '../clients/http.js';
 import { getMeta, openDb, setMeta } from '../db.js';
 import { publicDatabasePath } from '../public-snapshot.js';
@@ -7,6 +7,7 @@ import { radarReport } from '../radar-report.js';
 import { poolFacts } from './telegram.js';
 
 const usd = value => Number.isFinite(value) ? 'US$' + value.toLocaleString('en-US', { maximumFractionDigits: 2 }) : '–';
+const quoteMints = new Set([SOL, USDC, 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB']);
 
 export function publicTelegramMessage(event, report, dashboardUrl = '') {
   const clean = value => String(value ?? '–').replace(/\s+/g, ' ').slice(0, 120);
@@ -28,7 +29,15 @@ export function publicTelegramMessage(event, report, dashboardUrl = '') {
       if (target.protocol === 'https:' && !target.username && !target.password) buttons.push({ text: 'Profil wallet', url: target.href });
     } catch { /* A missing dashboard URL does not block delivery. */ }
   }
-  return { text, link_preview_options: { is_disabled: true }, reply_markup: { inline_keyboard: [buttons] } };
+  const tokens = [...new Map((pool.tokens ?? []).map(token => [token.mint, token])).values()];
+  const nonQuote = tokens.filter(token => !quoteMints.has(token.mint));
+  const copyTokens = nonQuote.length ? nonQuote : tokens.length === 2 ? tokens : [];
+  const copyButtons = copyTokens.map(({ mint, symbol, side }) => ({
+    text: copyTokens.length === 1 ? 'Copy CA' : 'Copy CA · ' + clean(symbol || 'Token ' + side).slice(0, 20),
+    copy_text: { text: mint },
+  }));
+  const inline_keyboard = copyButtons.length ? [buttons, copyButtons] : [buttons];
+  return { text, link_preview_options: { is_disabled: true }, reply_markup: { inline_keyboard } };
 }
 
 export function publicTelegramDelivery(db, logger, env = process.env, signal) {
