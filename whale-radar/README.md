@@ -69,6 +69,7 @@ Public candidates use the follow-up hold benchmark below with Meteora's indexed 
 
 ### Agent Dorm and Telegram
 
+- Untuk mengaktifkan notifikasi dan menautkan `/web` ke VPS, ikuti [panduan Telegram dan akses dashboard melalui IP](docs/telegram-vps.md).
 - Configure `RADAR_DORM_API_KEY` on the Radar web process. Agent Dorm uses `ALERT_MODE=http`, `ALERT_URL=http://127.0.0.1:9011/api/agent-dorm` (or the configured dashboard port), and the same value as `ALERT_API_KEY`. The adapter appends `/status`. The independent Bearer credential remains server-side. Use HTTPS or a private tunnel between hosts.
 - Run `npm run preview:telegram` with the public `RADAR_DB` to print the newest qualifying opening without sending a message. Set `RADAR_PUBLIC_TELEGRAM=1` and configure `TELEGRAM_BOT_TOKEN` and `RADAR_CHAT_ID` on the public worker to deliver new openings. Starting delivery excludes openings from before opt-in. The public feed and messages use the same deposit, fee, pool, and verification fields.
 

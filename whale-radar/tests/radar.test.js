@@ -22,7 +22,7 @@ import { refreshWallet } from '../src/jobs/wallets.js';
 import { publicHealth } from '../src/radar-report.js';
 import { refreshIntel, trending, trendingScore, whalePools } from '../src/intel/pools.js';
 import { http, ProviderError } from '../src/clients/http.js';
-import { publicTelegramMessage } from '../src/notify/public-telegram.js';
+import { publicTelegramDelivery, publicTelegramMessage } from '../src/notify/public-telegram.js';
 
 const cleanups = [];
 afterEach(async () => {
@@ -348,6 +348,28 @@ describe('realtime', () => {
 });
 
 describe('dashboard and intelligence', () => {
+  it('delivers an eligible durable opening even after the live wallet sample changes', async () => {
+    const ctx = fixture();
+    await discover(ctx);
+    const env = { RADAR_PUBLIC_TELEGRAM: '1', TELEGRAM_BOT_TOKEN: 'test-token', ALLOWED_CHAT_ID: '42',
+      RADAR_PUBLIC_URL: 'https://192.0.2.10:9443' };
+    const send = vi.fn(async () => new Response(JSON.stringify({ ok: true })));
+    vi.stubGlobal('fetch', send);
+    cleanups.push(() => vi.unstubAllGlobals());
+    const deliver = publicTelegramDelivery(ctx.db, ctx.logger, env);
+    const at = Date.now();
+    ctx.db.prepare('INSERT INTO public_activity_events VALUES (?,?,?,?)').run(mockSignature, mockPosition, at,
+      JSON.stringify({ signature: mockSignature, position: mockPosition, timestamp: at, wallet: mockWallet, pool: mockPool, depositUsd: 2500 }));
+    expect(whalePools(ctx.db)).toEqual([]);
+    await deliver();
+    await deliver();
+    expect(send).toHaveBeenCalledTimes(1);
+    const message = JSON.parse(send.mock.calls[0][1].body);
+    expect(message).toMatchObject({ chat_id: '42', text: expect.stringContaining('US$2,500') });
+    expect(message.reply_markup.inline_keyboard[0][2].url).toBe('https://192.0.2.10:9443/web/wallets/' + mockWallet);
+    expect(publicHealth(ctx.db).telegram).toMatchObject({ state: 'enabled', lastDeliveredAt: expect.any(Number) });
+  });
+
   it('uses an archived opening instruction when the current position has no funded bins', async () => {
     const ctx = fixture(':memory:', { webPassword: await bcrypt.hash('private', 4) });
     await discover(ctx);

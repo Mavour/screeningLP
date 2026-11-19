@@ -1,4 +1,7 @@
 const logger = require("./lib/logger");
+const { readFileSync } = require("node:fs");
+const { join } = require("node:path");
+const { parse } = require("dotenv");
 const { MENU } = require("./lib/constants");
 const { escapeHtml } = require("./lib/format");
 const telegram = require("./services/telegram.service");
@@ -17,6 +20,7 @@ function startBot() {
 
   bot.onText(/\/start/, (msg) => gated(msg, handleStart));
   bot.onText(/\/menu/, (msg) => gated(msg, (m) => renderMenu(m.chat.id)));
+  bot.onText(/^\/web(?:@[A-Za-z0-9_]+)?\s*$/, (msg) => gated(msg, (m) => renderRadarWeb(m.chat.id)));
   bot.on("callback_query", handleCallback);
   bot.on("message", handlePlain);
 
@@ -76,13 +80,36 @@ function mainKeyboard() {
       { text: "⏱ Age", callback_data: "cat:Age" },
       { text: "📡 Discovery", callback_data: "cat:Discovery" },
     ],
-    [{ text: "★ KOL avoid / green", callback_data: "kol" }],
+    [{ text: "★ KOL avoid / green", callback_data: "kol" }, { text: "🐋 Whale Radar", callback_data: "radar-web" }],
     [{ text: "↺ Reset default", callback_data: "reset" }],
   ];
 }
 
 function backMenu() {
   return [[{ text: "← Menu", callback_data: "menu" }]];
+}
+
+async function renderRadarWeb(chatId, messageId) {
+  let configured = process.env.RADAR_PUBLIC_URL;
+  if (!configured) {
+    try {
+      configured = parse(readFileSync(join(__dirname, "../whale-radar/.env"))).RADAR_PUBLIC_URL;
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+    }
+  }
+  let url;
+  if (configured) {
+    try {
+      const base = new URL(configured);
+      if (base.protocol === "https:" && !base.username && !base.password) url = new URL("/web", base).href;
+    } catch {
+      logger.warn("Invalid RADAR_PUBLIC_URL");
+    }
+  }
+  if (!url) return telegram.show(chatId, "Link HTTPS dashboard Whale Radar belum dikonfigurasi.", backMenu(), messageId);
+  return telegram.show(chatId, "<b>Whale Radar</b>\nDashboard pool dan posisi whale Meteora.",
+    [[{ text: "🐋 Buka dashboard", url }], ...backMenu()], messageId);
 }
 
 async function renderMenu(chatId, messageId) {
@@ -225,6 +252,7 @@ async function handleCallback(query) {
   try {
     if (data === "menu") return renderMenu(chatId, messageId);
     if (data === "status") return renderStatus(chatId, messageId);
+    if (data === "radar-web") return renderRadarWeb(chatId, messageId);
     if (data === "pools") return renderPools(chatId, messageId);
     if (data === "scan") return runScanFromMenu(chatId, messageId);
     if (data === "kol") return renderKol(chatId, messageId);

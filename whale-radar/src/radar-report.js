@@ -41,6 +41,8 @@ export function publicHealth(db, now = Date.now()) {
     scanCompletedAt: metaNumber(db, 'public_scan_completed_at'), scanState,
     lastPollAt: metaNumber(db, 'public_last_poll_at'), lastTransactionAt: metaNumber(db, 'public_last_rpc_processed_at'),
     lastVerifiedAt: metaNumber(db, 'public_last_verified_at'), queue,
+    telegram: { state: getMeta(db, 'public_telegram_state') ?? 'unknown',
+      lastDeliveredAt: db.prepare('SELECT max(sent_at) FROM public_telegram_delivery').pluck().get() },
   };
 }
 

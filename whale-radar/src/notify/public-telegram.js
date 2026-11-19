@@ -1,5 +1,5 @@
 import { pathToFileURL } from 'node:url';
-import { config } from '../config.js';
+import { WHALE_DEPOSIT_USD, config } from '../config.js';
 import { http } from '../clients/http.js';
 import { getMeta, openDb, setMeta } from '../db.js';
 import { publicDatabasePath } from '../public-snapshot.js';
@@ -36,24 +36,29 @@ export function publicTelegramDelivery(db, logger, env = process.env, signal) {
   const key = 'public_telegram_since';
   if (env.RADAR_PUBLIC_TELEGRAM !== '1') {
     setMeta(db, key, 0);
+    setMeta(db, 'public_telegram_state', 'disabled');
     return null;
   }
   if (!settings.telegramToken || !/^-?\d+$/.test(settings.chatId)) {
+    setMeta(db, 'public_telegram_state', 'missing_config');
     logger.warn('Public Telegram requires its token and a numeric chat ID');
     return null;
   }
   const since = Number(getMeta(db, key)) || Date.now();
   setMeta(db, key, since);
+  setMeta(db, 'public_telegram_state', 'enabled');
   const send = http('public telegram', { rpm: 20, timeout: 8000, retries: 0, signal });
   const update = db.prepare(`INSERT INTO public_telegram_delivery(signature,position,sent_at,attempts,retry_at) VALUES (?,?,?,?,?)
     ON CONFLICT(signature,position) DO UPDATE SET sent_at=excluded.sent_at,attempts=excluded.attempts,retry_at=excluded.retry_at`);
   return async () => {
-    const rows = db.prepare(`SELECT e.signature,e.position,coalesce(d.attempts,0) AS attempts
+    const rows = db.prepare(`SELECT e.signature,e.position,coalesce(d.attempts,0) AS attempts,q.deposit_usd AS legacy_deposit
       FROM public_activity_events e LEFT JOIN public_telegram_delivery d USING(signature,position)
-      JOIN whale_deposits q ON q.wallet=json_extract(e.detail,'$.wallet') AND q.pool=json_extract(e.detail,'$.pool')
+      JOIN wallets w ON w.address=json_extract(e.detail,'$.wallet') AND w.is_blacklisted=0
+      LEFT JOIN whale_deposits q ON q.wallet=w.address AND q.pool=json_extract(e.detail,'$.pool')
       WHERE e.happened_at>=? AND d.sent_at IS NULL AND coalesce(d.retry_at,0)<=?
+        AND coalesce(json_extract(e.detail,'$.depositUsd'),q.deposit_usd)>?
         AND e.rowid IN (SELECT rowid FROM public_activity_events ORDER BY happened_at DESC LIMIT 200)
-      ORDER BY e.happened_at LIMIT 3`).all(since, Date.now());
+      ORDER BY e.happened_at LIMIT 3`).all(since, Date.now(), WHALE_DEPOSIT_USD);
     if (!rows.length) return;
     const report = radarReport(db);
     const current = new Map(report.openings.map(event => [event.id, event]));
@@ -61,8 +66,9 @@ export function publicTelegramDelivery(db, logger, env = process.env, signal) {
       const event = current.get(row.signature + ':' + row.position);
       if (!event) continue;
       try {
+        const delivery = { ...event, walletDepositUsd: event.walletDepositUsd ?? row.legacy_deposit };
         const response = await send('https://api.telegram.org/bot' + settings.telegramToken + '/sendMessage', {
-          method: 'POST', body: { chat_id: settings.chatId, ...publicTelegramMessage(event, report, settings.publicUrl) }, retry: false,
+          method: 'POST', body: { chat_id: settings.chatId, ...publicTelegramMessage(delivery, report, settings.publicUrl) }, retry: false,
         });
         if (response.ok !== true) throw new Error('Telegram did not confirm delivery');
         update.run(row.signature, row.position, Date.now(), row.attempts, 0);

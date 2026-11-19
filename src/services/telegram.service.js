@@ -59,6 +59,7 @@ async function setupMenuChrome() {
   await b.setMyCommands([
     { command: "menu", description: "Buka menu" },
     { command: "start", description: "Mulai bot" },
+    { command: "web", description: "Buka dashboard Whale Radar" },
   ]);
   await b.setChatMenuButton({
     menu_button: JSON.stringify({ type: "commands" }),
