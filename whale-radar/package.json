@@ -1,0 +1,36 @@
+{
+  "name": "meteora-whale-radar",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "^20.19.0 || >=22.12.0" },
+  "scripts": {
+    "check:live": "node src/check-live.js",
+    "leaderboard": "node src/cli.js leaderboard",
+    "backfill": "node src/cli.js backfill",
+    "reclassify": "node src/cli.js reclassify",
+    "snapshot:public": "node src/public-snapshot.js",
+    "start:public": "node src/public-monitor.js",
+    "start:live": "node src/public-monitor.js --web",
+    "preview:telegram": "node src/notify/public-telegram.js",
+    "start:bot": "node src/cli.js bot",
+    "start:web": "node src/cli.js web",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.31.1",
+    "@fastify/formbody": "^8.0.2",
+    "@fastify/helmet": "^13.0.2",
+    "@fastify/rate-limit": "^10.3.0",
+    "@meteora-ag/dlmm": "1.9.14",
+    "@solana/web3.js": "^1.98.4",
+    "bcryptjs": "^3.0.2",
+    "better-sqlite3": "~12.4.1",
+    "bs58": "^6.0.0",
+    "dotenv": "^16.6.1",
+    "fastify": "^5.6.2",
+    "pino": "^9.14.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": { "vitest": "^3.2.6" },
+  "overrides": { "fastify": { "light-my-request": "6.6.0" } }
+}

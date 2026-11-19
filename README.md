@@ -195,3 +195,8 @@ Sebelum menghubungkan UI Dorm, tangani nilai null (harga/FDV/APR/lastScanAt),
 label arah skor risiko, flag FDV nonaktif, dan kelengkapan counter harian.
 UI dummy lama belum membedakan seluruh metadata tersebut. Bot belum
 otomatis dijalankan/restart dan konfigurasi Dorm belum diganti ke mode HTTP.
+
+## Whale Radar
+
+Whale Radar menambahkan ranking wallet LP Meteora DLMM, alert Telegram, dan dashboard privat.
+Panduan [deploy Whale Radar ke VPS](whale-radar/README.md#deploy-ke-vps-ubuntu) menjalankan Radar sebagai proses PM2 tersendiri.

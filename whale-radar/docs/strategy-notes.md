@@ -1,0 +1,11 @@
+# DLMM strategy decoding
+
+The [Meteora program IDL](https://github.com/MeteoraAg/dlmm-sdk/blob/main/idls/dlmm.json) and the IDL bundled with SDK 1.9.14 identify mainnet DLMM as `LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo`. The SDK CommonJS export is loaded from the ESM radar package using `createRequire`, because the distributed ESM entry uses an extensionless directory import that fails in native Node ESM.
+
+- Anchor decodes the documented `add_liquidity_by_strategy`, `add_liquidity_by_strategy2` and `add_liquidity_by_strategy_one_side` strategies from `liquidity_parameter.strategy_parameters.strategy_type`. Spot, Curve and BidAsk variants are mapped by family. An initialize-position instruction and an add on the same position distinguish an open from an add-only transaction.
+- Alert sizes come from parsed SPL and Token-2022 transfers from the instruction's source to its reserve. CPI uses recorded stack height to associate child transfers. Without attributable transfers, the event cannot qualify. A partially priced deposit qualifies only when its measured lower bound reaches the minimum, and is shown with ≥.
+- An on-chain open position snapshot uses SDK `positionLiquidity` per bin for distribution shape. The classifier trims empty outer bins, uses a coefficient of variation for Spot, and compares the center with both ends for Curve or BidAsk. Other shapes with enough bins are Mixed. One-sided position inventory is measured separately. Deposit shape and current inventory can differ after trades.
+- An archived position with no saved bin snapshot can use a historical add instruction when indexed and still available from RPC. Otherwise its shape remains unknown. Percent time in range is estimated from cumulative observed intervals, capped at 30 minutes per sample gap.
+- Bin price in token Y per human token X is `(1 + binStep / 10000) ^ binId × 10 ^ (decimalsX − decimalsY)`. Width is the high-to-low price ratio minus 1. A high range in the UI refers to this pool orientation.
+
+The [recorded transaction fixture](../fixtures/dlmm-spot-real.json) is a trimmed public Solana `getTransaction` response at slot 471170539. The [transaction](https://solscan.io/tx/3ehWVD3Vy8s13uwQb3qMJTuHuFm8SHoif2AENYsYo5zA6YMEYWU6PKTMePgJUEzn8k2Uf6dfNRsdzk1rFWwcTLN) opens a Spot position and transfers 50.459976 USDC through `AddLiquidityByStrategy2`.

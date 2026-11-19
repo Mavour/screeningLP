@@ -1,0 +1,11 @@
+{
+  "name": "MOCK–SOL",
+  "wallets": [
+    { "seed": 2, "closed": 24, "deposit": 12, "pnl": 2.1 },
+    { "seed": 3, "closed": 23, "deposit": 10, "pnl": 1.2 },
+    { "seed": 4, "closed": 12, "deposit": 3, "pnl": 0.1 }
+  ],
+  "depositSol": 15,
+  "binStep": 50,
+  "bins": [30, 20, 10, 5, 5, 10, 20, 30]
+}
