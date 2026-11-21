@@ -743,15 +743,30 @@ export function createWeb({ db, settings, tools }) {
     const details = new Map(latestPools(db).map(pool => [pool.address,pool]));
     const rows = whalePools(db);
     if (req.query.sort === 'size' || req.publicMode) rows.sort((a,b) => b.depositUsd-a.depositUsd || b.count-a.count);
-    return page(reply, req, 'Pools with tracked wallets', '<p>Sort by <a href="?sort=count">wallets</a> · <a href="?sort=size">size</a></p>' +
-      table(['Pool','Bin Step','Base fee','Dynamic fee','Whales','Deposit USD','Current size','Strategy mix','Avg width','FDV','TVL','Age'], rows.map(row => {
+    const sortLinks = '<p>Sort by <a href="?sort=count">wallets</a> · <a href="?sort=size">size</a></p>';
+    const poolTable = pools =>
+      table(['Pool','Bin Step','Base fee','Dynamic fee','Whales','Deposit USD','Current size','Strategy mix','Avg width','FDV','TVL','Age'], pools.map(row => {
         const pool = details.get(row.address);
         return [poolIdentity(row.address, pool?.name || row.name), num(pool?.binStep),
           pct(pool?.baseFeePct, 6), pct(pool?.dynamicFeePct, 6), num(row.count),
           '<strong class="gain">' + usd(row.depositUsd) + '</strong>', money(req,db,row.size),
           raw(Object.entries(row.mix).map(([label,count]) => count + '× ' + label).join(', ') || null),
           pct(row.width), usd(pool?.fdv), usd(pool?.tvl), age(pool?.createdAt)];
-      })));
+      }));
+    if (!req.publicMode) return page(reply, req, 'Pools with tracked wallets', sortLinks + poolTable(rows));
+
+    const cachedMarkets = rangeMarketCaps(db);
+    const groups = new Map(radarAlertFilters.TIERS.map(tier => [tier, []]));
+    const pending = [];
+    for (const row of rows) {
+      const pool = details.get(row.address);
+      const market = (pool && classifyOpeningMarket(pool)) ?? cachedMarkets[row.address];
+      (groups.get(market?.tier) ?? pending).push(row);
+    }
+    const sections = [...groups].map(([tier, pools]) => panel(tier, '', pools.length ? poolTable(pools) :
+      '<p class="openings-empty">No active whale pools in this category.</p>'));
+    if (pending.length) sections.push(panel('Pending market cap', '', poolTable(pending)));
+    return page(reply, req, 'Pools with tracked wallets', sortLinks + '<div class="opening-sections">' + sections.join('') + '</div>');
   });
   app.get('/web/trending', (req, reply) => page(reply, req, 'Trending pools',
     table(['Pool','Score','Tracked wallets','FDV','TVL','Volume 5m','Volume 1h','Volume 24h','Fees 24h','Fee/TVL','Fee APR est.','Bin Step','Base / dynamic fee','Risk flags'],

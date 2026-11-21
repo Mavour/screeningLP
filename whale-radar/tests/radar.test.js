@@ -829,7 +829,7 @@ describe('dashboard and intelligence', () => {
     expect(publicHealth(ctx.db, ctx.now + 60000).status).toBe('offline');
   });
 
-  it('shows each public wallet once and displays per-pool bin steps and trading fees', async () => {
+  it('shows each public wallet once and groups active pools by market cap with their trading fees', async () => {
     const ctx = fixture(':memory:', { webPassword: await bcrypt.hash('private', 4) });
     await discover(ctx);
     await refreshWallet(ctx, mockWallet);
@@ -837,7 +837,8 @@ describe('dashboard and intelligence', () => {
     setMeta(ctx.db, 'public_snapshot_at', position.last_checked_at);
     const secondPool = 'second-pool';
     savePosition(ctx.db, { ...position, position_pubkey: 'second-position', pool: secondPool, deposit_usd: 2500 });
-    snapshot(ctx.db, { address: mockPool, name: 'Same pair', binStep: 25, baseFeePct: 0.01, dynamicFeePct: 0.01875 }, ctx.now);
+    snapshot(ctx.db, { address: mockPool, name: 'Same pair', binStep: 25, baseFeePct: 0.01, dynamicFeePct: 0.01875,
+      tokenX: SOL, tokenY: mockPosition, marketCapYUsd: 5_000_000 }, ctx.now);
     snapshot(ctx.db, { address: secondPool, name: 'Same pair', binStep: 50, baseFeePct: 0.25, dynamicFeePct: 0 }, ctx.now);
     const app = createWeb(ctx);
     cleanups.push(() => app.close());
@@ -850,8 +851,21 @@ describe('dashboard and intelligence', () => {
     expect(wallets).toContain('dlmm/' + secondPool);
     const pools = (await app.inject({ url: '/web/pools', headers })).body;
     expect(pools).toContain('>Bin Step</th>');
-    expect(pools).toContain('>25</td><td>0.01%</td><td>0.01875%</td>');
-    expect(pools).toContain('>50</td><td>0.25%</td><td>0%</td>');
+    const [degen, afterDegen] = pools.split('>DEGEN</h2>')[1].split('>SEMI</h2>');
+    const [semi, afterSemi] = afterDegen.split('>SAVE</h2>');
+    const [save, pending] = afterSemi.split('>Pending market cap</h2>');
+    expect(degen).toContain('>25</td><td>0.01%</td><td>0.01875%</td>');
+    expect(degen).not.toContain('dlmm/' + secondPool);
+    expect(semi).toContain('No active whale pools in this category.');
+    expect(save).toContain('No active whale pools in this category.');
+    expect(pending).toContain('>50</td><td>0.25%</td><td>0%</td>');
+
+    setMeta(ctx.db, 'public_range_market_caps', JSON.stringify({ at: Date.now(), byPool: {
+      [secondPool]: { tier: 'SEMI', marketCapUsd: 15_000_000 },
+    } }));
+    const categorized = (await app.inject({ url: '/web/pools', headers })).body;
+    expect(categorized.split('>SEMI</h2>')[1].split('>SAVE</h2>')[0]).toContain('dlmm/' + secondPool);
+    expect(categorized).not.toContain('>Pending market cap</h2>');
   });
 
   it('excludes stale public positions after another snapshot refreshes the same pool', async () => {
