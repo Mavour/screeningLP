@@ -635,6 +635,15 @@ describe('dashboard and intelligence', () => {
     expect(result.json().chart).toContain('Relative position liquidity by bin');
     expect(result.json().chart).toContain('liquidity-bar below');
     expect(result.json().chart).toContain('bin-chart-marker right');
+    ctx.db.prepare('UPDATE positions SET lower_bin_id=7963,upper_bin_id=7963,active_bin_id=7962,bin_step=10 WHERE position_pubkey=?')
+      .run(mockPosition);
+    const singleBin = (await app.inject({ url: '/web/wallets/' + mockWallet, headers })).body;
+    expect(singleBin).toContain('<div class="range-bounds single-bin"><span>Bin 7,963 · +0.1%</span></div>');
+    expect(singleBin).toContain('Bin 7963, active bin 7962, Out of range');
+    ctx.db.prepare('UPDATE positions SET lower_bin_id=-301,upper_bin_id=-300,active_bin_id=0,bin_step=500 WHERE position_pubkey=?')
+      .run(mockPosition);
+    const narrow = (await app.inject({ url: '/web/wallets/' + mockWallet, headers })).body;
+    expect(narrow).toContain('<div class="range-bounds"><span>Bin -301</span><span>Bin -300</span></div>');
     ctx.db.prepare("UPDATE positions SET status='closed' WHERE position_pubkey=?").run(mockPosition);
     expect((await app.inject({ url, headers })).statusCode).toBe(404);
   });

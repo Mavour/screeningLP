@@ -130,6 +130,7 @@ button { cursor: pointer; }
 .range-strategy { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
 .bin-range { display: grid; gap: 4px; }
 .range-bounds { display: flex; justify-content: space-between; color: var(--text); font: 10px/1.4 ui-monospace, monospace; }
+.range-bounds.single-bin { justify-content: center; }
 .range-track { position: relative; height: 5px; margin: 1px 2px; border-radius: 6px; background: #365a72; }
 .range-fill { position: absolute; inset: 0 calc(100% - var(--hi)) 0 var(--lo); border-radius: inherit; background: var(--gradient); }
 .range-marker { position: absolute; left: var(--x); top: -3px; width: 2px; height: 11px; border-radius: 2px; background: var(--active-bin); transform: translateX(-50%); }

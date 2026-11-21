@@ -267,18 +267,27 @@ function binRange(position) {
   const max = Math.max(hi, active ?? hi) + 0.5;
   const offset = id => (100 * (id - min) / (max - min)).toFixed(3) + '%';
   const step = position.bin_step;
-  const label = id => {
-    if (active == null || !(step > 0)) return 'Bin ' + num(id, 0);
+  const priceOffset = (id, digits = 2) => {
+    if (active == null || !(step > 0)) return '';
     const delta = Math.expm1((id - active) * Math.log1p(step / 10000)) * 100;
-    if (!Number.isFinite(delta)) return 'Bin ' + num(id, 0);
-    return (delta > 0 ? '+' : '') + pct(delta);
+    return Number.isFinite(delta) ? (delta > 0 ? '+' : '') + pct(delta, digits) : '';
   };
+  const binLabel = id => 'Bin ' + num(id, 0);
+  const single = lo === hi;
+  const lowerOffset = priceOffset(lo);
+  const upperOffset = priceOffset(hi);
+  let bounds = [lowerOffset || binLabel(lo), upperOffset || binLabel(hi)];
+  if (single) bounds = [binLabel(lo) + (lowerOffset ? ' · ' + lowerOffset : '')];
+  else if (bounds[0] === bounds[1]) {
+    const precise = [priceOffset(lo, 4), priceOffset(hi, 4)];
+    bounds = precise[0] === precise[1] ? [binLabel(lo), binLabel(hi)] : precise;
+  }
   const outOfRange = active != null && (active < lo || active > hi);
   const state = position.status === 'closed' ? 'Closed' : active == null ? 'Active bin unavailable' :
     outOfRange ? 'Out of range' : 'In range';
   return '<div class="bin-range' + (outOfRange ? ' is-out-of-range' : '') +
-    '"><div class="range-bounds"><span>' + label(lo) + '</span><span>' + label(hi) + '</span></div>' +
-    '<div class="range-track" role="img" aria-label="' + escape('Bins ' + lo + ' to ' + hi +
+    '"><div class="range-bounds' + (single ? ' single-bin' : '') + '">' + bounds.map(label => '<span>' + label + '</span>').join('') + '</div>' +
+    '<div class="range-track" role="img" aria-label="' + escape((single ? 'Bin ' + lo : 'Bins ' + lo + ' to ' + hi) +
       (active == null ? '' : ', active bin ' + active) + ', ' + state) + '">' +
     '<i class="range-fill" style="--lo:' + offset(lo - 0.5) + ';--hi:' + offset(hi + 0.5) + '"></i>' +
     (active == null ? '' : '<i class="range-marker" title="Active bin ' + active + '" style="--x:' + offset(active) + '"></i>') +
