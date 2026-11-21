@@ -175,19 +175,27 @@ export async function refreshPublicMarket({ db, providers, logger, signal }, now
   await verifyStoredOpenings({ db, providers, logger, signal }, now);
   const pending = publicActivity(db).filter(event => event.alertMarket?.marketCapUsd == null);
   const metadata = new Map([...latestPools(db), ...results.map(row => row.metrics)].map(pool => [pool.address, pool]));
-  const pendingPools = [...new Set(pending.map(event => event.pool))].map(address => metadata.get(address)).filter(Boolean);
-  const markets = pendingPools.length ? await providers.openingMarkets(pendingPools).catch(error => {
-    logger.warn({ reason: error.message }, 'Opening market cap refresh unavailable');
-    return new Map(pendingPools.map(pool => [pool.address, classifyOpeningMarket(pool)]));
-  }) : new Map();
+  const marketAddresses = [...new Set([...results.map(row => row.metrics.address), ...pending.map(event => event.pool)])];
+  const markets = await providers.openingMarkets(marketAddresses.map(address => metadata.get(address)).filter(Boolean)).catch(error => {
+    logger.warn({ reason: error.message }, 'Market cap refresh unavailable');
+    return null;
+  });
   signal?.throwIfAborted();
   db.transaction(() => {
     for (const { metrics } of results) snapshot(db, metrics, now);
+    if (markets) {
+      const byPool = Object.fromEntries(marketAddresses.flatMap(address => {
+        const market = markets.get(address);
+        return market?.marketCapUsd > 0 ? [[address, { ...market, inverted: market.mint === metadata.get(address).tokenY }]] : [];
+      }));
+      setMeta(db, 'public_range_market_caps', JSON.stringify({ at: now, byPool }));
+    }
     const categorize = db.prepare(`UPDATE public_activity_events SET detail=json_set(detail,'$.alertMarket',json(?))
       WHERE signature=? AND position=? AND (json_extract(detail,'$.alertMarket') IS NULL OR
         (json_extract(detail,'$.alertMarket.marketCapUsd') IS NULL AND json_extract(detail,'$.alertMarket.mint')=? AND ? IS NOT NULL))`);
     for (const event of pending) {
-      const market = markets.get(event.pool);
+      const pool = metadata.get(event.pool);
+      const market = markets?.get(event.pool) ?? (pool && classifyOpeningMarket(pool));
       if (market) categorize.run(JSON.stringify(market), event.signature, event.position, market.mint, market.marketCapUsd);
     }
     const tokens = results.flatMap(({ raw }) => [raw.token_x, raw.token_y]);

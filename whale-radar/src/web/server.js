@@ -258,38 +258,57 @@ function marketTable(pools) {
   ]));
 }
 
-function binRange(position) {
+function rangeMarketCaps(db) {
+  const cache = JSON.parse(getMeta(db, 'public_range_market_caps') ?? 'null');
+  return cache?.at >= Date.now() - 10 * 60000 ? cache.byPool : {};
+}
+
+function binRange(position, market) {
   const lo = position.lower_bin_id;
   const hi = position.upper_bin_id;
   const active = position.status !== 'closed' && Number.isInteger(position.active_bin_id) ? position.active_bin_id : null;
   if (!Number.isInteger(lo) || !Number.isInteger(hi) || lo > hi) return '<div class="bin-range"><small>Range unavailable</small></div>';
   const min = Math.min(lo, active ?? lo) - 0.5;
   const max = Math.max(hi, active ?? hi) + 0.5;
-  const offset = id => (100 * (id - min) / (max - min)).toFixed(3) + '%';
+  const inverted = Boolean(market?.inverted);
+  const offset = id => (100 * (inverted ? max - id : id - min) / (max - min)).toFixed(3) + '%';
+  const [left, right] = inverted ? [hi, lo] : [lo, hi];
   const step = position.bin_step;
+  const logPriceRatio = id => (id - active) * (inverted ? -1 : 1) * Math.log1p(step / 10000);
   const priceOffset = (id, digits = 2) => {
     if (active == null || !(step > 0)) return '';
-    const delta = Math.expm1((id - active) * Math.log1p(step / 10000)) * 100;
-    return Number.isFinite(delta) ? (delta > 0 ? '+' : '') + pct(delta, digits) : '';
+    const delta = Math.expm1(logPriceRatio(id)) * 100;
+    return Number.isFinite(delta) ? (delta > 0 ? '+' : '') + pct(delta || 0, digits) : '';
   };
   const binLabel = id => 'Bin ' + num(id, 0);
   const single = lo === hi;
-  const lowerOffset = priceOffset(lo);
-  const upperOffset = priceOffset(hi);
-  let bounds = [lowerOffset || binLabel(lo), upperOffset || binLabel(hi)];
-  if (single) bounds = [binLabel(lo) + (lowerOffset ? ' · ' + lowerOffset : '')];
+  const leftOffset = priceOffset(left);
+  const rightOffset = priceOffset(right);
+  let bounds = [leftOffset || binLabel(left), rightOffset || binLabel(right)];
+  if (single) bounds = [binLabel(left) + (leftOffset ? ' · ' + leftOffset : '')];
   else if (bounds[0] === bounds[1]) {
-    const precise = [priceOffset(lo, 4), priceOffset(hi, 4)];
-    bounds = precise[0] === precise[1] ? [binLabel(lo), binLabel(hi)] : precise;
+    const precise = [priceOffset(left, 4), priceOffset(right, 4)];
+    bounds = !precise[0] || precise[0] === precise[1] ? [binLabel(left), binLabel(right)] : precise;
   }
+  const capAtBin = id => {
+    if (active == null || !(step > 0) || !(market?.marketCapUsd > 0)) return '';
+    const cap = market.marketCapUsd * Math.exp(logPriceRatio(id));
+    if (!Number.isFinite(cap) || cap <= 0) return '';
+    return '<span class="range-market-cap" title="' + escape('Estimated ' + (market.symbol || 'token') +
+      ' market cap at this bin · DEX Screener reference') + '">' + compactUsd(cap) + '</span>';
+  };
   const outOfRange = active != null && (active < lo || active > hi);
   const state = position.status === 'closed' ? 'Closed' : active == null ? 'Active bin unavailable' :
     outOfRange ? 'Out of range' : 'In range';
   return '<div class="bin-range' + (outOfRange ? ' is-out-of-range' : '') +
-    '"><div class="range-bounds' + (single ? ' single-bin' : '') + '">' + bounds.map(label => '<span>' + label + '</span>').join('') + '</div>' +
+    '"><div class="range-bounds' + (single ? ' single-bin' : '') + '">' + bounds.map((label, i) => {
+      const cap = capAtBin(i === 0 ? left : right);
+      return cap ? '<span class="range-endpoint">' + cap + '<span>' + label + '</span></span>' : '<span>' + label + '</span>';
+    }).join('') + '</div>' +
     '<div class="range-track" role="img" aria-label="' + escape((single ? 'Bin ' + lo : 'Bins ' + lo + ' to ' + hi) +
       (active == null ? '' : ', active bin ' + active) + ', ' + state) + '">' +
-    '<i class="range-fill" style="--lo:' + offset(lo - 0.5) + ';--hi:' + offset(hi + 0.5) + '"></i>' +
+    '<i class="range-fill" style="--lo:' + offset(left + (inverted ? 0.5 : -0.5)) +
+    ';--hi:' + offset(right + (inverted ? -0.5 : 0.5)) + '"></i>' +
     (active == null ? '' : '<i class="range-marker" title="Active bin ' + active + '" style="--x:' + offset(active) + '"></i>') +
     '</div><small><span class="range-status">' + state + '</span>' +
     (active == null ? '' : ' · Active bin ' + num(active, 0)) + '</small></div>';
@@ -337,10 +356,10 @@ function positionStrategy(position) {
     '<small>Strategy unknown</small>';
 }
 
-function positionRange(position, savedBins, canRead) {
+function positionRange(position, savedBins, canRead, market) {
   const actionable = position.status === 'open' && canRead;
   const lastSeen = savedBins[0]?.snapshot_at;
-  return '<div class="position-range"><div class="range-strategy">' + positionStrategy(position) + '</div>' + binRange(position) +
+  return '<div class="position-range"><div class="range-strategy">' + positionStrategy(position) + '</div>' + binRange(position, market) +
     (actionable || savedBins.length ? '<details class="bin-details"' + (actionable ? ' data-position-bins="' +
       escape(position.position_pubkey) + '"' : '') + '><summary>' + (actionable ? 'On-chain bins' : 'Saved bin snapshot') +
       '</summary><div class="bin-detail-content" aria-live="polite">' +
@@ -452,13 +471,14 @@ function walletDetail(db, req, w, csrf, canReadBins) {
     const positions = db.prepare('SELECT * FROM positions WHERE wallet=?' + poolFilter + ' AND status=? ORDER BY coalesce(closed_at,opened_at) DESC LIMIT 200')
       .all(...walletArgs, tab);
     const pool = new Map(latestPools(db).map(p => [p.address, p]));
+    const caps = rangeMarketCaps(db);
     const binsFor = db.prepare('SELECT bin_id AS id, liquidity, snapshot_at FROM position_bins WHERE position_pubkey=? ORDER BY bin_id');
     const rendered = positions.map(p => {
       const info = pool.get(p.pool);
       const flags = info?.risks?.join(', ');
       return [poolLink(p.pool, p.pool_name) + (flags ? '<br><small>' + raw(flags) + '</small>' : ''),
         metric(usd(info?.fdv) + ' / ' + usd(info?.tvl), (info?.fdvSource || 'Jupiter') + ' price × supply · Meteora TVL'),
-        positionRange(p, binsFor.all(p.position_pubkey), canReadBins),
+        positionRange(p, binsFor.all(p.position_pubkey), canReadBins, caps[p.pool]),
         metric(money(req, db, p.pnl_sol, p.pnl_usd, true), source(req) + ' · Position PnL'), when(p.opened_at) + '<br><small>' +
         (p.closed_at && p.opened_at ? num((p.closed_at - p.opened_at) / DAY, 1) + ' d' : age(p.opened_at)) + '</small>',
         money(req, db, p.deposit_sol, p.deposit_usd), money(req, db, p.withdraw_sol),
@@ -631,7 +651,7 @@ export function createWeb({ db, settings, tools }) {
               liquidityChart(historical, bins, at, 'Configured deposit amount') + '</div>';
           }
         }
-        return { range: binRange(indexed), strategy: positionStrategy(strategy), chart };
+        return { range: binRange(indexed, rangeMarketCaps(db)[position.pool]), strategy: positionStrategy(strategy), chart };
       });
       cached = { until: Date.now() + 45000, result };
       binCache.set(id, cached);

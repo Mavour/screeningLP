@@ -537,6 +537,8 @@ describe('dashboard and intelligence', () => {
     await refreshPublicMarket(ctx);
     expect(publicActivity(ctx.db)).toEqual([expect.objectContaining({ position: mockPosition, openingDepositUsd: 2000,
       alertMarket: expect.objectContaining({ tier: 'SEMI', symbol: 'TOKEN' }) })]);
+    expect(JSON.parse(getMeta(ctx.db, 'public_range_market_caps')).byPool[mockPool])
+      .toMatchObject({ symbol: 'TOKEN', marketCapUsd: 15000000, inverted: false });
     const app = createWeb(ctx);
     cleanups.push(() => app.close());
     const response = await app.inject({ url: '/web/alerts', headers: { authorization: 'Basic ' + Buffer.from('mock:private').toString('base64') } });
@@ -646,6 +648,28 @@ describe('dashboard and intelligence', () => {
     expect(narrow).toContain('<div class="range-bounds"><span>Bin -301</span><span>Bin -300</span></div>');
     ctx.db.prepare("UPDATE positions SET status='closed' WHERE position_pubkey=?").run(mockPosition);
     expect((await app.inject({ url, headers })).statusCode).toBe(404);
+  });
+
+  it.each([false, true])('shows market cap above matching percentage bounds with token Y pricing set to %s', async inverted => {
+    const ctx = fixture(':memory:', { webPassword: await bcrypt.hash('private', 4) });
+    await discover(ctx);
+    await refreshWallet(ctx, mockWallet);
+    ctx.db.prepare(`UPDATE positions SET lower_bin_id=?,upper_bin_id=?,active_bin_id=0,bin_step=10000,
+      strategy_label='BIDASK',strategy_source='instruction' WHERE position_pubkey=?`)
+      .run(inverted ? 0 : -1, inverted ? 1 : 0, mockPosition);
+    setMeta(ctx.db, 'public_range_market_caps', JSON.stringify({ at: ctx.now,
+      byPool: { [mockPool]: { marketCapUsd: 1000000, symbol: 'TOKEN', inverted } } }));
+    ctx.tools = { positionBins: async () => ({ bins: [{ id: 0, liquidity: 1 }] }), applyBins: position => position };
+    const app = createWeb(ctx);
+    cleanups.push(() => app.close());
+    const headers = { authorization: 'Basic ' + Buffer.from('mock:private').toString('base64') };
+    const profile = await app.inject({ url: '/web/wallets/' + mockWallet, headers });
+    const bins = await app.inject({ url: '/web/positions/' + mockPosition + '/bins', headers });
+    expect(bins.statusCode).toBe(200);
+    for (const html of [profile.body, bins.json().range]) {
+      expect(html).toContain('>$500K</span><span>-50%</span>');
+      expect(html).toContain('>$1M</span><span>0%</span>');
+    }
   });
 
   it('publishes a single public candidate with closed history and retains it after a provider failure', async () => {
