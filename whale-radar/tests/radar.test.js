@@ -446,7 +446,8 @@ describe('dashboard and intelligence', () => {
     expect(message.text).toContain('Posisi baru · DEGEN');
     expect(message.text).toContain('Koin LP  FIONA\nMarket cap  US$3,000,000\n');
     expect(message.text).not.toContain('US$2,500');
-    expect(message.reply_markup.inline_keyboard[0][2].url).toBe('https://192.0.2.10:9443/web/wallets/' + mockWallet);
+    expect(message.reply_markup.inline_keyboard[0][2].url).toBe('https://192.0.2.10:9443/web/wallets/' + mockWallet +
+      '?opening=' + mockSignature + '&position=' + mockPosition + '#opening-details');
     expect(message.reply_markup.inline_keyboard[1]).toEqual([{ text: 'Copy CA', copy_text: { text: mockPosition } }]);
     expect(publicHealth(ctx.db).telegram).toMatchObject({ state: 'enabled', lastDeliveredAt: expect.any(Number) });
   });
@@ -570,6 +571,38 @@ describe('dashboard and intelligence', () => {
     expect(response.body).toContain('at least US$2,000 in one transaction');
     expect(response.body).toContain('No qualifying openings have been verified yet.');
     expect(response.body).not.toContain('<table>');
+  });
+
+  it('links to the exact opening and retains its position details after the latest pool sample changes', async () => {
+    const ctx = fixture(':memory:', { webPassword: await bcrypt.hash('private', 4) });
+    await discover(ctx);
+    await refreshWallet(ctx, mockWallet);
+    ctx.db.prepare('UPDATE positions SET deposit_usd=2000 WHERE position_pubkey=?').run(mockPosition);
+    const observed = ctx.db.prepare('SELECT last_checked_at FROM positions WHERE position_pubkey=?').pluck().get(mockPosition);
+    setMeta(ctx.db, 'public_snapshot_at', observed);
+    expect(whalePools(ctx.db)).toEqual([]);
+    savePublicOpening(ctx.db, { signature: mockSignature, position: mockPosition, wallet: mockWallet, pool: mockPool,
+      timestamp: ctx.now, label: 'BIDASK', openingDepositUsd: 2000, openingBins: { lower: -6, upper: 1, active: 2 } });
+    const app = createWeb(ctx);
+    cleanups.push(() => app.close());
+    const headers = { authorization: 'Basic ' + Buffer.from('mock:private').toString('base64') };
+    const feed = (await app.inject({ url: '/web/alerts', headers })).body;
+    const path = '/web/wallets/' + mockWallet + '?unit=SOL&opening=' + mockSignature + '&position=' + mockPosition;
+    expect(feed).toContain('href="' + path.replaceAll('&', '&amp;') + '#opening-details"');
+    const fresh = (await app.inject({ url: path, headers })).body;
+    expect(fresh).toContain('<h2>Position opening</h2>');
+    expect(fresh).toContain('<strong>$2,000</strong>');
+    expect(fresh).toContain('data-position-bins="' + mockPosition);
+    expect((await app.inject({ url: '/web/positions/' + mockPosition + '/bins', headers })).statusCode).toBe(200);
+    setMeta(ctx.db, 'public_snapshot_at', observed + 1000);
+    const stale = (await app.inject({ url: path, headers })).body;
+    expect(stale).toContain('Last observed open');
+    expect(stale).toContain('BID-ASK');
+    expect(stale).not.toContain('data-position-bins="' + mockPosition);
+    ctx.db.prepare("UPDATE positions SET status='closed' WHERE position_pubkey=?").run(mockPosition);
+    const closed = (await app.inject({ url: path, headers })).body;
+    expect(closed).toContain('aria-current="page" href="?tab=closed&amp;unit=SOL"');
+    expect(closed).toContain('data-label="Current status">Closed');
   });
 
   it('offers a separate copy button for each token in a pair without a quote mint', () => {

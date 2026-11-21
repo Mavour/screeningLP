@@ -214,6 +214,14 @@ export function publicActivity(db) {
     .map(row => JSON.parse(row.detail));
 }
 
+export function publicOpening(db, wallet, signature, position) {
+  const detail = db.prepare(`SELECT e.detail FROM public_activity_events e
+    JOIN wallets w ON w.address=json_extract(e.detail,'$.wallet') AND w.is_blacklisted=0
+    WHERE e.signature=? AND e.position=? AND w.address=? AND json_extract(e.detail,'$.openingDepositUsd')>=?`)
+    .pluck().get(signature, position, wallet, PUBLIC_OPENING_MIN_USD);
+  return detail ? JSON.parse(detail) : null;
+}
+
 export function scheduleWallet(db, address, dueAt) {
   db.prepare(`INSERT INTO wallet_jobs(wallet,due_at) VALUES (?,?)
     ON CONFLICT(wallet) DO UPDATE SET due_at=min(due_at,excluded.due_at)`).run(address, dueAt);

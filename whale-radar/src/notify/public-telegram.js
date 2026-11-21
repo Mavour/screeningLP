@@ -45,7 +45,12 @@ export function publicTelegramMessage(event, report, dashboardUrl = '') {
   if (dashboardUrl) {
     try {
       const target = new URL('/web/wallets/' + event.wallet, dashboardUrl);
-      if (target.protocol === 'https:' && !target.username && !target.password) buttons.push({ text: 'Profil wallet', url: target.href });
+      if (target.protocol === 'https:' && !target.username && !target.password) {
+        target.searchParams.set('opening', event.signature);
+        target.searchParams.set('position', event.position);
+        target.hash = 'opening-details';
+        buttons.push({ text: 'Profil wallet', url: target.href });
+      }
     } catch { /* A missing dashboard URL does not block delivery. */ }
   }
   const tokens = [...new Map((pool.tokens ?? []).map(token => [token.mint, token])).values()];

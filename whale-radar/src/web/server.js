@@ -6,14 +6,15 @@ import rateLimit from '@fastify/rate-limit';
 import formbody from '@fastify/formbody';
 import bcrypt from 'bcryptjs';
 import radarAlertFilters from '../../../src/state/radarAlertFilters.store.js';
-import { DAY, PUBLIC_OPENING_MIN_USD } from '../config.js';
-import { getMeta, latestPools, publicActivity, scheduleWallet } from '../db.js';
+import { DAY, PUBLIC_OPENING_MIN_USD, SOL } from '../config.js';
+import { getMeta, latestPools, publicActivity, publicOpening, scheduleWallet } from '../db.js';
 import { trending, whalePools } from '../intel/pools.js';
 import { isAddress, isSignature } from '../strategy/instructions.js';
 import { smartLpStatus } from '../discovery/smart-lp.js';
 import { publicSmartLpReport, resetSmartLpFavorite } from '../discovery/public-leaderboard.js';
 import { agentDormSnapshot, publicHealth, radarReport } from '../radar-report.js';
 import { classifyOpeningMarket } from '../opening-market.js';
+import { relativePriceRange } from '../strategy/distribution.js';
 import { enqueue, webhookSignatures } from '../realtime/worker.js';
 
 const css = readFileSync(new URL('./radar.css', import.meta.url), 'utf8');
@@ -110,9 +111,11 @@ function main(req, title, contents) {
     contents + '</main></div></body></html>';
 }
 
-function linkWallet(wallet, req, tab) {
+function linkWallet(wallet, req, tab, opening) {
+  const target = opening ? '&amp;opening=' + encodeURIComponent(opening.signature) +
+    '&amp;position=' + encodeURIComponent(opening.position) + '#opening-details' : '';
   return '<a class="mono" href="/web/wallets/' + encodeURIComponent(wallet) + '?unit=' +
-    displayUnit(req.query.unit) + (tab ? '&amp;tab=' + tab : '') + '">' + escape(wallet.slice(0, 6) + '…' + wallet.slice(-5)) + '</a>' +
+    displayUnit(req.query.unit) + (tab ? '&amp;tab=' + tab : '') + target + '">' + escape(wallet.slice(0, 6) + '…' + wallet.slice(-5)) + '</a>' +
     ' <button type="button" class="copy" data-copy="' + escape(wallet) + '" aria-label="Copy wallet address">Copy</button>';
 }
 const poolLink = (address, name) => '<a href="https://app.meteora.ag/dlmm/' + encodeURIComponent(address) +
@@ -146,7 +149,7 @@ const signed = (value, content) => value > 0 ? '<span class="gain">' + content +
 
 function publicActivityTable(req, rows, pools) {
   return table(['Wallet', 'Pool', 'LP coin', 'Opening deposit', 'Strategy', 'Time', 'Transaction'], rows.map(row => [
-    linkWallet(row.wallet, req), poolLink(row.pool, pools.get(row.pool)?.name),
+    linkWallet(row.wallet, req, null, row), poolLink(row.pool, pools.get(row.pool)?.name),
     row.alertMarket ? raw(row.alertMarket.symbol || row.alertMarket.mint) + ' <span class="badge">' + raw(row.alertMarket.tier) + '</span>' +
       (row.alertMarket.marketCapUsd == null ? '' : ' ' + compactUsd(row.alertMarket.marketCapUsd)) : '–',
     '<span class="gain">' + usd(row.openingDepositUsd) + '</span>',
@@ -442,15 +445,38 @@ function walletList(db, req) {
     '<div class="pages">' + (page > 1 ? paging(page - 1) : '') + (rows.length > 50 ? paging(page + 1) : '') + '</div>';
 }
 
+function openingDetails(opening, position, info) {
+  const bins = opening.openingBins;
+  const range = bins && relativePriceRange(bins.lower, bins.upper, bins.active, info?.binStep ?? position?.bin_step,
+    info?.tokenX === SOL);
+  const endpoints = range ? [...new Set([range.min, range.max])].map(value => (value > 0 ? '+' : '') + pct(value || 0)).join(' to ') :
+    Number.isInteger(bins?.lower) && Number.isInteger(bins?.upper) ? `Bins ${num(bins.lower, 0)} to ${num(bins.upper, 0)}` : '–';
+  const status = position?.status === 'closed' ? 'Closed' : position?.current_observation ? 'Open' :
+    position ? 'Last observed open · ' + when(position.last_checked_at) : 'Outside the latest position sample';
+  return '<div id="opening-details">' + panel('Position opening', '',
+    table(['Pool', 'Position', 'Opening deposit', 'Strategy', 'Opening range', 'Opened', 'Current status'], [[
+      poolLink(opening.pool, info?.name ?? position?.pool_name), raw(opening.position),
+      '<strong>' + usd(opening.openingDepositUsd) + '</strong>', raw(opening.label), raw(endpoints),
+      '<a class="external" href="https://solscan.io/tx/' + encodeURIComponent(opening.signature) + '" rel="noreferrer">' +
+        when(opening.timestamp) + ' ↗</a>', status,
+    ]], true)) + '</div>';
+}
+
 function walletDetail(db, req, w, csrf, canReadBins) {
-  const tab = ['closed', 'alerts'].includes(req.query.tab) ? req.query.tab : 'open';
+  const opening = req.publicMode && isSignature(req.query.opening) && isAddress(req.query.position) ?
+    publicOpening(db, w.address, req.query.opening, req.query.position) : null;
+  const selected = opening && db.prepare(`SELECT p.*,EXISTS (SELECT 1 FROM current_position_observations c
+    WHERE c.position_pubkey=p.position_pubkey) AS current_observation FROM positions p WHERE position_pubkey=? AND wallet=? AND pool=?`)
+    .get(opening.position, w.address, opening.pool);
+  const tab = ['open', 'closed', 'alerts'].includes(req.query.tab) ? req.query.tab : selected?.status === 'closed' ? 'closed' : 'open';
   const unit = displayUnit(req.query.unit);
   const profile = db.prepare('SELECT * FROM wallet_strategy_profile WHERE wallet=?').get(w.address);
   const candidate = req.publicMode && isPublicCandidate(db, w);
   const poolFilter = req.publicMode ? ' AND (' + (candidate ? "status='closed' OR " : '') +
+    'position_pubkey=? OR ' +
     '(pool IN (SELECT pool FROM whale_deposits WHERE wallet=?) AND ' +
     "(status='closed' OR position_pubkey IN (SELECT position_pubkey FROM current_position_observations))))" : '';
-  const walletArgs = req.publicMode ? [w.address, w.address] : [w.address];
+  const walletArgs = req.publicMode ? [w.address, selected?.position_pubkey ?? null, w.address] : [w.address];
   const averages = db.prepare(`SELECT avg(CASE WHEN status='closed' THEN (closed_at-opened_at)/60000.0 END) AS hold,
     avg(deposit_sol) AS size FROM positions WHERE wallet=?${poolFilter}`).get(...walletArgs);
   const editor = '<form class="filters" method="post"><input type="hidden" name="csrf" value="' + csrf +
@@ -469,23 +495,25 @@ function walletDetail(db, req, w, csrf, canReadBins) {
     ' min</div><div>Average deposit ' + money(req, db, averages.size) + '</div></section></div>';
   const links = '<nav class="tabs">' + [['open','Active'],['closed','Closed'],['alerts','Alerts']].map(([v, label]) =>
     '<a ' + (v === tab ? 'aria-current="page" ' : '') + 'href="?tab=' + v + '&amp;unit=' + unit + '">' + label + '</a>').join('') + '</nav>';
+  const pool = new Map(latestPools(db).map(p => [p.address, p]));
   let rows;
   if (tab === 'alerts') {
-    rows = req.publicMode ? publicActivityTable(req, publicActivity(db).filter(row => row.wallet === w.address),
-      new Map(latestPools(db).map(pool => [pool.address, pool]))) :
+    rows = req.publicMode ? publicActivityTable(req, publicActivity(db).filter(row => row.wallet === w.address), pool) :
       alertsTable(db, req, db.prepare('SELECT * FROM alerts WHERE wallet=? AND sent_at IS NOT NULL ORDER BY id DESC LIMIT 200').all(w.address));
   } else {
-    const positions = db.prepare('SELECT * FROM positions WHERE wallet=?' + poolFilter + ' AND status=? ORDER BY coalesce(closed_at,opened_at) DESC LIMIT 200')
-      .all(...walletArgs, tab);
-    const pool = new Map(latestPools(db).map(p => [p.address, p]));
+    const positions = db.prepare('SELECT * FROM positions WHERE wallet=?' + poolFilter +
+      ' AND status=? ORDER BY (position_pubkey=?) DESC,coalesce(closed_at,opened_at) DESC LIMIT 200')
+      .all(...walletArgs, tab, selected?.position_pubkey ?? null);
     const caps = rangeMarketCaps(db);
     const binsFor = db.prepare('SELECT bin_id AS id, liquidity, snapshot_at FROM position_bins WHERE position_pubkey=? ORDER BY bin_id');
     const rendered = positions.map(p => {
       const info = pool.get(p.pool);
       const flags = info?.risks?.join(', ');
+      const stale = p.position_pubkey === selected?.position_pubkey && p.status === 'open' && !selected.current_observation;
       return [poolLink(p.pool, p.pool_name) + (flags ? '<br><small>' + raw(flags) + '</small>' : ''),
         metric(usd(info?.fdv) + ' / ' + usd(info?.tvl), (info?.fdvSource || 'Jupiter') + ' price × supply · Meteora TVL'),
-        positionRange(p, binsFor.all(p.position_pubkey), canReadBins, rangeMarket(info, caps[p.pool])),
+        positionRange(stale ? { ...p, active_bin_id: null } : p, binsFor.all(p.position_pubkey), canReadBins && !stale,
+          rangeMarket(info, caps[p.pool])),
         metric(money(req, db, p.pnl_sol, p.pnl_usd, true), source(req) + ' · Position PnL'), when(p.opened_at) + '<br><small>' +
         (p.closed_at && p.opened_at ? num((p.closed_at - p.opened_at) / DAY, 1) + ' d' : age(p.opened_at)) + '</small>',
         money(req, db, p.deposit_sol, p.deposit_usd), money(req, db, p.withdraw_sol),
@@ -506,7 +534,8 @@ function walletDetail(db, req, w, csrf, canReadBins) {
       evidencePanels(db, req, w.address) :
       '<p class="source-note">Position history shown for pools where this wallet has more than US$2,000 in open-position deposits.</p>')
     : stats + evidencePanels(db, req, w.address);
-  return '<p class="mono address">' + raw(w.address) + '</p>' + editor + scope + links + rows;
+  return '<p class="mono address">' + raw(w.address) + '</p>' + editor +
+    (opening ? openingDetails(opening, selected, pool.get(opening.pool)) : '') + scope + links + rows;
 }
 
 function isPublicCandidate(db, wallet) {
@@ -622,7 +651,11 @@ export function createWeb({ db, settings, tools }) {
     if (!tools || !isAddress(id)) return reply.code(404).send();
     const position = db.prepare("SELECT * FROM positions WHERE position_pubkey=? AND status='open'").get(id);
     if (!position || (req.publicMode && !db.prepare(`SELECT 1 FROM current_position_observations c
-      JOIN whale_deposits q ON q.wallet=? AND q.pool=? WHERE c.position_pubkey=?`).get(position.wallet, position.pool, id))) {
+      WHERE c.position_pubkey=? AND (EXISTS (SELECT 1 FROM whale_deposits WHERE wallet=? AND pool=?) OR
+        EXISTS (SELECT 1 FROM public_activity_events e JOIN wallets w ON w.address=? AND w.is_blacklisted=0
+          WHERE e.position=c.position_pubkey AND json_extract(e.detail,'$.wallet')=w.address
+            AND json_extract(e.detail,'$.pool')=? AND json_extract(e.detail,'$.openingDepositUsd')>=?))`)
+      .get(id, position.wallet, position.pool, position.wallet, position.pool, PUBLIC_OPENING_MIN_USD))) {
       return reply.code(404).send();
     }
     let cached = binCache.get(id);
