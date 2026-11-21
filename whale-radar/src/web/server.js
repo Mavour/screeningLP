@@ -272,7 +272,7 @@ function rangeMarket(pool, cached) {
   return indexed?.marketCapUsd > 0 ? { ...indexed, inverted: indexed.mint === pool.tokenY } : cached;
 }
 
-function binRange(position, market) {
+function binRange(position, market, lastObserved = false) {
   const lo = position.lower_bin_id;
   const hi = position.upper_bin_id;
   const active = position.status !== 'closed' && Number.isInteger(position.active_bin_id) ? position.active_bin_id : null;
@@ -300,7 +300,7 @@ function binRange(position, market) {
     bounds = !precise[0] || precise[0] === precise[1] ? [binLabel(left), binLabel(right)] : precise;
   }
   const capAtBin = id => {
-    if (active == null || !(step > 0) || !(market?.marketCapUsd > 0)) return '';
+    if (lastObserved || active == null || !(step > 0) || !(market?.marketCapUsd > 0)) return '';
     const cap = market.marketCapUsd * Math.exp(logPriceRatio(id));
     if (!Number.isFinite(cap) || cap <= 0) return '';
     return '<span class="range-market-cap" title="' + escape('Estimated ' + (market.symbol || 'token') +
@@ -310,17 +310,17 @@ function binRange(position, market) {
   const state = position.status === 'closed' ? 'Closed' : active == null ? 'Active bin unavailable' :
     outOfRange ? 'Out of range' : 'In range';
   return '<div class="bin-range' + (outOfRange ? ' is-out-of-range' : '') +
-    '">' + (active != null && step > 0 && !(market?.marketCapUsd > 0) ? '<small>Market cap unavailable</small>' : '') +
+    '">' + (!lastObserved && active != null && step > 0 && !(market?.marketCapUsd > 0) ? '<small>Market cap unavailable</small>' : '') +
     '<div class="range-bounds' + (single ? ' single-bin' : '') + '">' + bounds.map((label, i) => {
       const cap = capAtBin(i === 0 ? left : right);
       return cap ? '<span class="range-endpoint">' + cap + '<span>' + label + '</span></span>' : '<span>' + label + '</span>';
     }).join('') + '</div>' +
     '<div class="range-track" role="img" aria-label="' + escape((single ? 'Bin ' + lo : 'Bins ' + lo + ' to ' + hi) +
-      (active == null ? '' : ', active bin ' + active) + ', ' + state) + '">' +
+      (active == null ? '' : ', active bin ' + active) + ', ' + (lastObserved ? 'Last observation · ' : '') + state) + '">' +
     '<i class="range-fill" style="--lo:' + offset(left + (inverted ? 0.5 : -0.5)) +
     ';--hi:' + offset(right + (inverted ? -0.5 : 0.5)) + '"></i>' +
     (active == null ? '' : '<i class="range-marker" title="Active bin ' + active + '" style="--x:' + offset(active) + '"></i>') +
-    '</div><small><span class="range-status">' + state + '</span>' +
+    '</div><small><span class="range-status">' + (lastObserved ? 'Last observation · ' : '') + state + '</span>' +
     (active == null ? '' : ' · Active bin ' + num(active, 0)) + '</small></div>';
 }
 
@@ -366,12 +366,14 @@ function positionStrategy(position) {
     '<small>Strategy unknown</small>';
 }
 
-function positionRange(position, savedBins, canRead, market) {
+function positionRange(position, savedBins, { canRead, market, lastObserved, refresh }) {
   const actionable = position.status === 'open' && canRead;
   const lastSeen = savedBins[0]?.snapshot_at;
-  return '<div class="position-range"><div class="range-strategy">' + positionStrategy(position) + '</div>' + binRange(position, market) +
+  return '<div class="position-range"><div class="range-strategy">' + positionStrategy(position) + '</div>' +
+    binRange(position, market, lastObserved) +
     (actionable || savedBins.length ? '<details class="bin-details"' + (actionable ? ' data-position-bins="' +
-      escape(position.position_pubkey) + '"' : '') + '><summary>' + (actionable ? 'On-chain bins' : 'Saved bin snapshot') +
+      escape(position.position_pubkey) + '"' + (refresh ? ' data-refresh-range' : '') : '') +
+      '><summary>' + (actionable ? 'On-chain bins' : 'Saved bin snapshot') +
       '</summary><div class="bin-detail-content" aria-live="polite">' +
       (savedBins.length ? liquidityChart(position, savedBins, lastSeen) : '') + '</div></details>' :
       '<small class="bin-unavailable">Bin snapshot unavailable</small>') + '</div>';
@@ -509,11 +511,12 @@ function walletDetail(db, req, w, csrf, canReadBins) {
     const rendered = positions.map(p => {
       const info = pool.get(p.pool);
       const flags = info?.risks?.join(', ');
-      const stale = p.position_pubkey === selected?.position_pubkey && p.status === 'open' && !selected.current_observation;
+      const isSelected = p.position_pubkey === selected?.position_pubkey;
+      const lastObserved = isSelected && p.status === 'open' && !selected.current_observation;
       return [poolLink(p.pool, p.pool_name) + (flags ? '<br><small>' + raw(flags) + '</small>' : ''),
         metric(usd(info?.fdv) + ' / ' + usd(info?.tvl), (info?.fdvSource || 'Jupiter') + ' price × supply · Meteora TVL'),
-        positionRange(stale ? { ...p, active_bin_id: null } : p, binsFor.all(p.position_pubkey), canReadBins && !stale,
-          rangeMarket(info, caps[p.pool])),
+        positionRange(p, binsFor.all(p.position_pubkey), { canRead: canReadBins, market: rangeMarket(info, caps[p.pool]),
+          lastObserved, refresh: isSelected }),
         metric(money(req, db, p.pnl_sol, p.pnl_usd, true), source(req) + ' · Position PnL'), when(p.opened_at) + '<br><small>' +
         (p.closed_at && p.opened_at ? num((p.closed_at - p.opened_at) / DAY, 1) + ' d' : age(p.opened_at)) + '</small>',
         money(req, db, p.deposit_sol, p.deposit_usd), money(req, db, p.withdraw_sol),
@@ -650,12 +653,13 @@ export function createWeb({ db, settings, tools }) {
     const id = req.params.id;
     if (!tools || !isAddress(id)) return reply.code(404).send();
     const position = db.prepare("SELECT * FROM positions WHERE position_pubkey=? AND status='open'").get(id);
-    if (!position || (req.publicMode && !db.prepare(`SELECT 1 FROM current_position_observations c
-      WHERE c.position_pubkey=? AND (EXISTS (SELECT 1 FROM whale_deposits WHERE wallet=? AND pool=?) OR
+    if (!position || (req.publicMode && !db.prepare(`SELECT 1 WHERE
+      (EXISTS (SELECT 1 FROM current_position_observations WHERE position_pubkey=?)
+        AND EXISTS (SELECT 1 FROM whale_deposits WHERE wallet=? AND pool=?)) OR
         EXISTS (SELECT 1 FROM public_activity_events e JOIN wallets w ON w.address=? AND w.is_blacklisted=0
-          WHERE e.position=c.position_pubkey AND json_extract(e.detail,'$.wallet')=w.address
-            AND json_extract(e.detail,'$.pool')=? AND json_extract(e.detail,'$.openingDepositUsd')>=?))`)
-      .get(id, position.wallet, position.pool, position.wallet, position.pool, PUBLIC_OPENING_MIN_USD))) {
+          WHERE e.position=? AND json_extract(e.detail,'$.wallet')=w.address
+            AND json_extract(e.detail,'$.pool')=? AND json_extract(e.detail,'$.openingDepositUsd')>=?)`)
+      .get(id, position.wallet, position.pool, position.wallet, id, position.pool, PUBLIC_OPENING_MIN_USD))) {
       return reply.code(404).send();
     }
     let cached = binCache.get(id);

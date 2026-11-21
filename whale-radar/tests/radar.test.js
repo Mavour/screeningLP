@@ -583,6 +583,9 @@ describe('dashboard and intelligence', () => {
     expect(whalePools(ctx.db)).toEqual([]);
     savePublicOpening(ctx.db, { signature: mockSignature, position: mockPosition, wallet: mockWallet, pool: mockPool,
       timestamp: ctx.now, label: 'BIDASK', openingDepositUsd: 2000, openingBins: { lower: -6, upper: 1, active: 2 } });
+    const pool = normalizePool({ address: mockPool, token_x: { address: mockPosition, symbol: 'TOKEN', market_cap: 1000000 },
+      token_y: { address: SOL } });
+    snapshot(ctx.db, { ...pool, takenAt: ctx.now }, ctx.now);
     const app = createWeb(ctx);
     cleanups.push(() => app.close());
     const headers = { authorization: 'Basic ' + Buffer.from('mock:private').toString('base64') };
@@ -593,16 +596,21 @@ describe('dashboard and intelligence', () => {
     expect(fresh).toContain('<h2>Position opening</h2>');
     expect(fresh).toContain('<strong>$2,000</strong>');
     expect(fresh).toContain('data-position-bins="' + mockPosition);
-    expect((await app.inject({ url: '/web/positions/' + mockPosition + '/bins', headers })).statusCode).toBe(200);
     setMeta(ctx.db, 'public_snapshot_at', observed + 1000);
     const stale = (await app.inject({ url: path, headers })).body;
     expect(stale).toContain('Last observed open');
     expect(stale).toContain('BID-ASK');
-    expect(stale).not.toContain('data-position-bins="' + mockPosition);
+    expect(stale).toContain('Last observation · Out of range');
+    expect(stale).toContain('data-position-bins="' + mockPosition + '" data-refresh-range');
+    const live = await app.inject({ url: '/web/positions/' + mockPosition + '/bins', headers });
+    expect(live.statusCode).toBe(200);
+    expect(live.json().range).toContain('class="range-market-cap"');
+    expect(live.json().range).not.toContain('Last observation');
     ctx.db.prepare("UPDATE positions SET status='closed' WHERE position_pubkey=?").run(mockPosition);
     const closed = (await app.inject({ url: path, headers })).body;
     expect(closed).toContain('aria-current="page" href="?tab=closed&amp;unit=SOL"');
     expect(closed).toContain('data-label="Current status">Closed');
+    expect((await app.inject({ url: '/web/positions/' + mockPosition + '/bins', headers })).statusCode).toBe(404);
   });
 
   it('offers a separate copy button for each token in a pair without a quote mint', () => {

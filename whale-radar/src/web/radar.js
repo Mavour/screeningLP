@@ -10,8 +10,8 @@ document.addEventListener('click', async event => {
   setTimeout(() => { button.textContent = 'Copy'; }, 1500);
 });
 
-async function refreshBins(details) {
-  if (!(details instanceof HTMLDetailsElement) || !details.open || !details.dataset.positionBins ||
+async function refreshBins(details, preload = false) {
+  if (!(details instanceof HTMLDetailsElement) || (!details.open && !preload) || !details.dataset.positionBins ||
       details.dataset.loading === 'true' || Number(details.dataset.loadedAt) + 45000 > Date.now()) return;
   const chart = details.querySelector('.bin-detail-content');
   chart.querySelector('.bin-read-status')?.remove();
@@ -39,6 +39,13 @@ async function refreshBins(details) {
 }
 
 document.addEventListener('toggle', event => refreshBins(event.target), true);
+
+function refreshSelectedRange(root) {
+  const details = root.querySelector('details[data-refresh-range]');
+  if (details) refreshBins(details, true);
+}
+
+refreshSelectedRange(document);
 
 const radarState = document.querySelector('[data-radar-state]');
 if (radarState) {
@@ -69,7 +76,10 @@ if (radarState) {
       const main = document.querySelector('main');
       if (!main) return;
       const openBins = main.querySelectorAll('details[data-position-bins][open]');
-      if (health.running) [...openBins].slice(0, 3).forEach(refreshBins);
+      if (health.running) {
+        [...openBins].slice(0, 3).forEach(details => refreshBins(details));
+        refreshSelectedRange(main);
+      }
       if (health.revision === document.body.dataset.radarRevision || isUsingPage(main)) return;
 
       const page = await fetch(location.origin + location.pathname + location.search, { signal: AbortSignal.timeout(8000) });
@@ -79,6 +89,7 @@ if (radarState) {
       if (!next || isUsingPage(main)) return;
       const offsets = [...main.querySelectorAll('.scroll')].map(el => el.scrollLeft);
       main.replaceWith(next);
+      refreshSelectedRange(next);
       next.querySelectorAll('.scroll').forEach((el, index) => { el.scrollLeft = offsets[index] ?? 0; });
       document.body.dataset.radarRevision = updated.body.dataset.radarRevision ?? health.revision;
     } catch {
