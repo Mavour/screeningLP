@@ -1,8 +1,9 @@
-import { WHALE_DEPOSIT_USD } from './config.js';
+import { PUBLIC_OPENING_MIN_USD, SOL, WHALE_DEPOSIT_USD } from './config.js';
 import { getMeta, latestPools, publicActivity } from './db.js';
 import { whalePools } from './intel/pools.js';
 import { publicSmartLpReport } from './discovery/public-leaderboard.js';
 import { smartLpStatus } from './discovery/smart-lp.js';
+import { relativePriceRange } from './strategy/distribution.js';
 import { isAddress } from './strategy/instructions.js';
 
 const iso = value => value > 0 ? new Date(value).toISOString() : null;
@@ -75,18 +76,26 @@ export function radarReport(db, now = Date.now()) {
     const openings = publicActivity(db).map(event => {
       const pool = byPool.get(event.pool) ?? marketFacts(event.pool);
       const evaluation = smartLpStatus(db, event.wallet, now);
+      const depositedMints = new Set(event.transfers?.filter(transfer => Number(transfer.amount) > 0).map(transfer => transfer.mint));
+      const depositSide = depositedMints.size > 1 ? 'double' : depositedMints.has(SOL) ? 'sol' : depositedMints.size ? 'token' : null;
+      const bins = event.openingBins;
+      // For SOL pairs, quote the other token in SOL regardless of Meteora's X/Y order.
+      const openingRangePct = bins && pool.tokens.length === 2 ? relativePriceRange(bins.lower, bins.upper, bins.active,
+        pool.binStep, pool.tokens.some(token => token.side === 'X' && token.mint === SOL)) : null;
       return {
         id: event.signature + ':' + event.position, signature: event.signature, position: event.position,
         wallet: event.wallet, at: iso(event.timestamp), strategy: event.label ?? null,
         strategySource: event.label ? 'instruction' : null,
         verification: 'observed_whale', smartLpStatus: evaluation.cohort === 'candidate' ? evaluation.status : null,
-        walletDepositUsd: event.depositUsd, pool,
+        walletDepositUsd: event.depositUsd ?? null, openingDepositUsd: event.openingDepositUsd, depositSide, openingRangePct,
+        alertMarket: event.alertMarket ?? null, pool,
         transactionUrl: 'https://solscan.io/tx/' + encodeURIComponent(event.signature),
       };
     });
     const stats = db.prepare('SELECT coalesce(sum(active_positions),0) AS activePositions FROM whale_deposits').get();
     return {
       version: 1, source: 'Solana RPC + Meteora DLMM Data API', mode: 'public', thresholdUsd: WHALE_DEPOSIT_USD,
+      openingThresholdUsd: PUBLIC_OPENING_MIN_USD,
       heartbeatAt: iso(metaNumber(db, 'public_worker_heartbeat')), health,
       totals: { wallets: new Set(whales.flatMap(row => row.wallets.map(wallet => wallet.wallet))).size,
         pools: pools.length, activePositions: stats.activePositions, depositUsd: pools.reduce((sum, row) => sum + row.depositUsd, 0),

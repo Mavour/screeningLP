@@ -1,26 +1,44 @@
 import { pathToFileURL } from 'node:url';
-import { SOL, USDC, WHALE_DEPOSIT_USD, config } from '../config.js';
+import radarAlertFilters from '../../../src/state/radarAlertFilters.store.js';
+import { SOL, PUBLIC_OPENING_MIN_USD, config } from '../config.js';
 import { http } from '../clients/http.js';
 import { getMeta, openDb, setMeta } from '../db.js';
 import { publicDatabasePath } from '../public-snapshot.js';
 import { radarReport } from '../radar-report.js';
 import { poolFacts } from './telegram.js';
+import { stableMints } from '../opening-market.js';
 
 const usd = value => Number.isFinite(value) ? 'US$' + value.toLocaleString('en-US', { maximumFractionDigits: 2 }) : '–';
-const quoteMints = new Set([SOL, USDC, 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB']);
+const quoteMints = new Set([SOL, ...stableMints]);
+const depositSides = { sol: 'SOL side', token: 'Token side', double: 'Double side' };
+const signedPct = new Intl.NumberFormat('id-ID', { style: 'percent', signDisplay: 'exceptZero', maximumFractionDigits: 2 });
+
+function openingRange(event) {
+  if (!event.openingRangePct) return '–';
+  const { min, max } = event.openingRangePct;
+  const pct = value => signedPct.format(value / 100);
+  if (min === max || !max) return pct(min);
+  if (!min) return pct(max);
+  return pct(min) + ' s.d. ' + pct(max);
+}
 
 export function publicTelegramMessage(event, report, dashboardUrl = '') {
   const clean = value => String(value ?? '–').replace(/\s+/g, ' ').slice(0, 120);
   const time = event.at ? new Intl.DateTimeFormat('id-ID', { dateStyle: 'medium', timeStyle: 'medium',
     timeZone: 'Asia/Makassar' }).format(new Date(event.at)) + ' WITA' : '–';
-  const { pool } = event;
+  const { pool, alertMarket } = event;
   const text = [
-    '🐋 Whale Radar · Posisi baru', clean(pool.pair) + ' · Observed whale', '',
-    'Deposit wallet di pool  ' + usd(event.walletDepositUsd),
-    'Ambang  > ' + usd(report.thresholdUsd) + ' per wallet per pool',
-    'Wallet  ' + clean(event.wallet), 'Strategi  ' + clean(event.strategy), 'Waktu transaksi  ' + time,
+    '🐋 Whale Radar · Posisi baru' + (alertMarket ? ' · ' + alertMarket.tier : ''), clean(pool.pair) + ' · Observed whale', '',
+    ...(alertMarket ? ['Koin LP  ' + clean(alertMarket.symbol || alertMarket.mint) +
+      (alertMarket.isMajor ? ' · Aset mayor' : '')] : []),
+    'Market cap  ' + usd(alertMarket?.marketCapUsd),
+    'Deposit pembukaan  ' + usd(event.openingDepositUsd),
+    'Minimum  ' + usd(PUBLIC_OPENING_MIN_USD) + ' per posisi dalam satu transaksi',
+    'Wallet  ' + clean(event.wallet), 'Strategi  ' + clean(event.strategy),
+    'Sisi deposit  ' + (depositSides[event.depositSide] ?? '–'), 'Range pembukaan  ' + openingRange(event),
+    'Waktu transaksi  ' + time,
     ...(event.smartLpStatus === 'verified' ? ['Status wallet  Verified Smart LP'] : []),
-    '', ...poolFacts(pool), '', 'Sumber  ' + report.source,
+    '', ...poolFacts(pool), '', 'Sumber  ' + report.source + (alertMarket?.marketCapUsd > 0 ? ' + DEX Screener' : ''),
   ].join('\n');
   const buttons = [{ text: 'Pool Meteora', url: pool.poolUrl }, { text: 'Transaksi Solscan', url: event.transactionUrl }];
   if (dashboardUrl) {
@@ -60,24 +78,31 @@ export function publicTelegramDelivery(db, logger, env = process.env, signal) {
   const update = db.prepare(`INSERT INTO public_telegram_delivery(signature,position,sent_at,attempts,retry_at) VALUES (?,?,?,?,?)
     ON CONFLICT(signature,position) DO UPDATE SET sent_at=excluded.sent_at,attempts=excluded.attempts,retry_at=excluded.retry_at`);
   return async () => {
-    const rows = db.prepare(`SELECT e.signature,e.position,coalesce(d.attempts,0) AS attempts,q.deposit_usd AS legacy_deposit
-      FROM public_activity_events e LEFT JOIN public_telegram_delivery d USING(signature,position)
+    const filters = radarAlertFilters.load();
+    if (Object.values(filters).every(filter => !filter.enabled)) return;
+    const rows = db.prepare(`WITH eligible AS (
+      SELECT e.signature,e.position,e.happened_at FROM public_activity_events e
       JOIN wallets w ON w.address=json_extract(e.detail,'$.wallet') AND w.is_blacklisted=0
-      LEFT JOIN whale_deposits q ON q.wallet=w.address AND q.pool=json_extract(e.detail,'$.pool')
-      WHERE e.happened_at>=? AND d.sent_at IS NULL AND coalesce(d.retry_at,0)<=?
-        AND coalesce(json_extract(e.detail,'$.depositUsd'),q.deposit_usd)>?
-        AND e.rowid IN (SELECT rowid FROM public_activity_events ORDER BY happened_at DESC LIMIT 200)
-      ORDER BY e.happened_at LIMIT 3`).all(since, Date.now(), WHALE_DEPOSIT_USD);
+      WHERE json_extract(e.detail,'$.openingDepositUsd')>=?
+      ORDER BY e.happened_at DESC LIMIT 200
+    )
+    SELECT e.signature,e.position,e.happened_at,coalesce(d.attempts,0) AS attempts
+    FROM eligible e LEFT JOIN public_telegram_delivery d USING(signature,position)
+    WHERE e.happened_at>=? AND d.sent_at IS NULL AND coalesce(d.retry_at,0)<=?
+    ORDER BY e.happened_at`).all(PUBLIC_OPENING_MIN_USD, since, Date.now());
     if (!rows.length) return;
     const report = radarReport(db);
     const current = new Map(report.openings.map(event => [event.id, event]));
+    let attempted = 0;
     for (const row of rows) {
       const event = current.get(row.signature + ':' + row.position);
-      if (!event) continue;
+      const filter = filters[event?.alertMarket?.tier];
+      if (!filter?.enabled || row.happened_at < filter.enabledAt) continue;
+      if (attempted === 3) break;
+      attempted++;
       try {
-        const delivery = { ...event, walletDepositUsd: event.walletDepositUsd ?? row.legacy_deposit };
         const response = await send('https://api.telegram.org/bot' + settings.telegramToken + '/sendMessage', {
-          method: 'POST', body: { chat_id: settings.chatId, ...publicTelegramMessage(delivery, report, settings.publicUrl) }, retry: false,
+          method: 'POST', body: { chat_id: settings.chatId, ...publicTelegramMessage(event, report, settings.publicUrl) }, retry: false,
         });
         if (response.ok !== true) throw new Error('Telegram did not confirm delivery');
         update.run(row.signature, row.position, Date.now(), row.attempts, 0);

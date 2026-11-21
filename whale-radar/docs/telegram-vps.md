@@ -17,7 +17,9 @@ pm2 restart lp-scanner --update-env
 curl -fsS -u radar http://127.0.0.1:9011/web/public-status
 ```
 
-`telegram.state: "enabled"` berarti pengiriman sudah disiapkan. `telegram.lastDeliveredAt` terisi setelah Telegram mengonfirmasi pesan pertama. Alert dipicu pembukaan posisi yang memenuhi ambang lebih dari US$2.000 per wallet per pool setelah verifikasi.
+`telegram.state: "enabled"` berarti pengiriman sudah disiapkan. `telegram.lastDeliveredAt` terisi setelah Telegram mengonfirmasi pesan pertama. Alert dipicu pembukaan posisi dengan deposit minimal US$2.000 dalam satu transaksi.
+
+Buka **/menu → Filter alert Whale Radar** untuk mengatur DEGEN (di bawah US$10 juta), SEMI (US$10–50 juta, termasuk kedua batas), dan SAVE (di atas US$50 juta atau aset mayor seperti SOL dan HYPE). Semua kategori aktif secara default. Saat kategori dinyalakan kembali, pengiriman dimulai dari pembukaan baru. Bot dan worker membaca pengaturan yang sama dari `data/radar-alert-filters.json` di checkout, jadi jalankan keduanya dari checkout yang sama. Halaman Openings tetap menampilkan ketiga kategori dan memisahkan posisi yang menunggu data market cap.
 
 ## Buka dashboard melalui IP dan port
 

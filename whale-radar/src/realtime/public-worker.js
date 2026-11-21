@@ -1,6 +1,8 @@
-import { WHALE_DEPOSIT_USD } from '../config.js';
+import { PUBLIC_OPENING_MIN_USD, WHALE_DEPOSIT_USD } from '../config.js';
 import { parallel } from '../clients/http.js';
-import { getMeta, latestPools, refreshProfile, savePublicPosition, setMeta, snapshot, touchWallet } from '../db.js';
+import { getMeta, latestPools, refreshProfile, savePublicOpening, savePublicPosition, setMeta, snapshot, touchWallet } from '../db.js';
+import { openingDepositUsd, serializePublicOpening } from '../public-snapshot.js';
+import { classifyOpeningMarket } from '../opening-market.js';
 import { accountOwner, closurePositions, isAddress, parsePositions, PROGRAM } from '../strategy/instructions.js';
 import { enqueue } from './worker.js';
 
@@ -62,13 +64,7 @@ export async function refreshPublicWallets({ db, providers, logger, signal }, no
     errors.length < targets.length ? 'partial' : 'failed');
 }
 
-function serializeEvent(event, wallet, signature, at) {
-  return { wallet, pool: event.pool, position: event.position, label: event.label, signature, timestamp: at, kind: event.kind,
-    transfers: [...event.amounts].map(([mint, amount]) =>
-      ({ mint, amount: amount.toString(), decimals: event.decimals.get(mint) ?? null })) };
-}
-
-function persist(ctx, group, state, signature, at, observedAt) {
+function persist(ctx, group, state, openings, alertMarket, signature, at, observedAt) {
   const { db, logger } = ctx;
   return db.transaction(() => {
     const previous = db.prepare('SELECT observed_at FROM public_pool_refresh WHERE wallet=? AND pool=?').get(group.wallet, group.pool);
@@ -79,7 +75,7 @@ function persist(ctx, group, state, signature, at, observedAt) {
     if (existing?.is_blacklisted) return;
     const positions = [...state.positions.values()].map(row => row.position);
     const amount = positions.reduce((sum, row) => sum + (row.deposit_usd ?? 0), 0);
-    if (!existing && !(amount > WHALE_DEPOSIT_USD)) return;
+    if (!existing && !(amount > WHALE_DEPOSIT_USD) && !openings.length) return;
     touchWallet(db, group.wallet, observedAt);
     db.prepare("UPDATE wallets SET validation='public_sample' WHERE address=? AND current_rank IS NULL").run(group.wallet);
     db.prepare(`INSERT INTO public_pool_refresh VALUES (?,?,?) ON CONFLICT(wallet,pool)
@@ -100,13 +96,11 @@ function persist(ctx, group, state, signature, at, observedAt) {
       if (prior?.status === 'open') savePublicPosition(db, { ...prior, status: 'closed', closed_at: at, last_checked_at: observedAt });
     }
     refreshProfile(db, group.wallet, observedAt);
-    if (!(amount > WHALE_DEPOSIT_USD)) return;
+    if (!(amount > WHALE_DEPOSIT_USD) && !openings.length) return;
     if (state.pool) snapshot(db, state.pool, observedAt);
-    const insert = db.prepare('INSERT OR IGNORE INTO public_activity_events(signature,position,happened_at,detail) VALUES (?,?,?,?)');
-    for (const event of group.liquidity.filter(event => event.kind === 'opened')) {
-      insert.run(signature, event.position, at, JSON.stringify({
-        ...serializeEvent(event, group.wallet, signature, at), depositUsd: amount,
-      }));
+    for (const { event, usd } of openings) {
+      savePublicOpening(db, { ...serializePublicOpening(event, group.wallet, signature, at),
+        depositUsd: amount, openingDepositUsd: usd, alertMarket });
     }
     setMeta(db, 'public_last_verified_at', observedAt);
     logger.info({ pool: group.pool, signature, amountUsd: amount, latencyMs: observedAt - at }, 'Public pool deposits verified');
@@ -146,7 +140,19 @@ async function processSignature(ctx, signature, pools) {
       group.closures.some(position => state.positions.has(position))) {
       throw new Error('Meteora has not indexed this position update');
     }
-    persist(ctx, group, state, signature, at, observedAt);
+    const openings = [];
+    for (const event of group.liquidity.filter(event => event.kind === 'opened')) {
+      const adds = await providers.positionAdds(event.position);
+      const usd = openingDepositUsd(adds, signature, event.position, group.pool, group.wallet);
+      if (usd == null) throw new Error('Meteora has not indexed the opening deposit amount');
+      if (usd >= PUBLIC_OPENING_MIN_USD) openings.push({ event, usd });
+    }
+    const alertMarket = openings.length && state.pool ? await providers.openingMarkets([state.pool])
+      .then(markets => markets.get(group.pool) ?? null).catch(error => {
+        ctx.logger.warn({ pool: group.pool, reason: error.message }, 'Opening market cap unavailable');
+        return classifyOpeningMarket(state.pool);
+      }) : null;
+    persist(ctx, group, state, openings, alertMarket, signature, at, observedAt);
   });
   if (rows.some(row => row.error)) throw rows.find(row => row.error).error;
   return true;

@@ -5,6 +5,7 @@ import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
 import formbody from '@fastify/formbody';
 import bcrypt from 'bcryptjs';
+import radarAlertFilters from '../../../src/state/radarAlertFilters.store.js';
 import { DAY } from '../config.js';
 import { getMeta, latestPools, publicActivity, scheduleWallet } from '../db.js';
 import { trending, whalePools } from '../intel/pools.js';
@@ -49,7 +50,7 @@ const metricSources = {
   'Dynamic fee': 'Meteora DLMM reported fee at the time of the snapshot, including base and variable fees',
   'Risk flags': 'Available token audit and pool flags', 'Tracked wallets': 'Whale Radar SQLite activity',
   'Deposit USD': 'USD deposits recorded by the position data provider',
-  'Pool deposits': 'Meteora USD deposits across the wallet’s open positions in this pool',
+  'Opening deposit': 'USD deposited into this position in its opening transaction, as indexed by Meteora',
 };
 
 function equal(a, b) {
@@ -142,9 +143,11 @@ const signed = (value, content) => value > 0 ? '<span class="gain">' + content +
   value < 0 ? '<span class="loss">' + content + '</span>' : content;
 
 function publicActivityTable(req, rows, pools) {
-  return table(['Wallet', 'Pool', 'Pool deposits', 'Strategy', 'Time', 'Transaction'], rows.map(row => [
+  return table(['Wallet', 'Pool', 'LP coin', 'Opening deposit', 'Strategy', 'Time', 'Transaction'], rows.map(row => [
     linkWallet(row.wallet, req), poolLink(row.pool, pools.get(row.pool)?.name),
-    '<span class="gain">' + usd(row.depositUsd) + '</span>',
+    row.alertMarket ? raw(row.alertMarket.symbol || row.alertMarket.mint) + ' <span class="badge">' + raw(row.alertMarket.tier) + '</span>' +
+      (row.alertMarket.marketCapUsd == null ? '' : ' ' + compactUsd(row.alertMarket.marketCapUsd)) : '–',
+    '<span class="gain">' + usd(row.openingDepositUsd) + '</span>',
     row.label ? '<span class="badge">' + raw(row.label) + '</span>' : '–', when(row.timestamp),
     '<a class="external" href="https://solscan.io/tx/' + encodeURIComponent(row.signature) + '" rel="noreferrer">Solscan ↗</a>',
   ]));
@@ -687,8 +690,15 @@ export function createWeb({ db, settings, tools }) {
   app.get('/web/alerts', (req, reply) => {
     const wallet = req.query.wallet;
     const pool = req.query.pool;
-    if (req.publicMode) return page(reply, req, 'Observed openings',
-      publicActivityTable(req, publicActivity(db), new Map(latestPools(db).map(item => [item.address, item]))));
+    if (req.publicMode) {
+      const openings = publicActivity(db);
+      const pools = new Map(latestPools(db).map(item => [item.address, item]));
+      const pending = openings.filter(row => !row.alertMarket);
+      const sections = radarAlertFilters.TIERS.map(tier => panel(tier, '',
+        publicActivityTable(req, openings.filter(row => row.alertMarket?.tier === tier), pools)));
+      if (pending.length) sections.push(panel('Pending market cap', '', publicActivityTable(req, pending, pools)));
+      return page(reply, req, 'Observed openings', sections.join(''));
+    }
     const clauses = ['sent_at IS NOT NULL'];
     const args = [];
     if (wallet && isAddress(wallet)) { clauses.push('wallet=?'); args.push(wallet); }

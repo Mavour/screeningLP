@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import bcrypt from 'bcryptjs';
 import { WebSocketServer } from 'ws';
-import { config, DAY, SOL } from '../src/config.js';
-import { openDb, getMeta, leaderboard, publicActivity, savePosition, savePublicPosition, setMeta, snapshot } from '../src/db.js';
+import radarAlertFilters from '../../src/state/radarAlertFilters.store.js';
+import { config, DAY, SOL, USDC } from '../src/config.js';
+import { openDb, getMeta, leaderboard, publicActivity, savePosition, savePublicOpening, savePublicPosition, setMeta, snapshot } from '../src/db.js';
 import { discover, scoreWallets, summarize, verification } from '../src/discovery/leaderboard.js';
 import { discoverPublicSmartLp, hasPendingSmartLpFavorites, publicSmartLpReport } from '../src/discovery/public-leaderboard.js';
 import { evaluateCohort, evaluateEvidence, holdBenchmark, smartLpStatus } from '../src/discovery/smart-lp.js';
@@ -19,10 +20,12 @@ import { watchActivity } from '../src/realtime/watch.js';
 import { pollPublicPools, processPublicInbox, publicLiquidityLogs } from '../src/realtime/public-worker.js';
 import { createWeb, createWebhook } from '../src/web/server.js';
 import { refreshWallet } from '../src/jobs/wallets.js';
-import { publicHealth } from '../src/radar-report.js';
+import { publicHealth, radarReport } from '../src/radar-report.js';
 import { refreshIntel, trending, trendingScore, whalePools } from '../src/intel/pools.js';
 import { http, ProviderError } from '../src/clients/http.js';
 import { publicTelegramDelivery, publicTelegramMessage } from '../src/notify/public-telegram.js';
+import { classifyOpeningMarket, openingMarketLookup } from '../src/opening-market.js';
+import { refreshPublicMarket } from '../src/public-snapshot.js';
 
 const cleanups = [];
 afterEach(async () => {
@@ -172,7 +175,7 @@ describe('strategies', () => {
     const result = parsePositions(tx);
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({ position: '8JhkF5EvQNkurNVKovpsy4tf2wCrU7BjdQvdUX7ZvzF3',
-      kind: 'opened', label: 'SPOT', lower: 533, upper: 574 });
+      kind: 'opened', label: 'SPOT', lower: 533, upper: 574, activeBin: 574 });
     expect(result[0].amounts.get('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v')).toBe(50_459_976n);
   });
   it('decodes Anchor strategy, actual deposit, open/add and failed transactions', () => {
@@ -216,20 +219,54 @@ describe('realtime', () => {
     let indexedAt = eventTime - 1000;
     ctx.providers.openPoolPositions = async (_wallet, _pool, at) => ({
       positions: new Map([[mockPosition, { position: positionAt(at, 2500), indexedAt }]]),
+      pool: { address: mockPool, tokenX: SOL, tokenY: mockPosition },
     });
+    ctx.providers.openingMarkets = async pools => new Map(pools.map(pool => [pool.address,
+      classifyOpeningMarket(pool, new Map([[mockPosition, { marketCapUsd: 5000000 }]]))]));
+    ctx.providers.positionAdds = async () => [{ eventType: 'add', signature: mockSignature, positionAddress: mockPosition,
+      poolAddress: mockPool, userAddress: mockWallet, ixIndex: 1, totalUsd: '2500' }];
     await processPublicInbox(ctx);
     expect(publicActivity(ctx.db)).toEqual([]);
     expect(ctx.db.prepare('SELECT attempts FROM event_inbox').get().attempts).toBe(1);
     indexedAt = eventTime;
     ctx.db.exec('UPDATE event_inbox SET available_at=0');
     await processPublicInbox(ctx);
-    expect(publicActivity(ctx.db)).toEqual([expect.objectContaining({ wallet: mockWallet, depositUsd: 2500 })]);
+    expect(publicActivity(ctx.db)).toEqual([expect.objectContaining({ wallet: mockWallet, depositUsd: 2500,
+      alertMarket: expect.objectContaining({ tier: 'DEGEN', mint: mockPosition }),
+      openingBins: { lower: -6, upper: 1, active: null }, transfers: [expect.objectContaining({ mint: SOL })] })]);
     savePublicPosition(ctx.db, positionAt(ctx.now - 1000, 100));
     expect(whalePools(ctx.db)).toEqual([expect.objectContaining({ address: mockPool, depositUsd: 2500 })]);
     setMeta(ctx.db, 'public_snapshot_at', Date.now() + 60000);
     expect(whalePools(ctx.db)).toEqual([]);
     expect(publicActivity(ctx.db)).toEqual([expect.objectContaining({ wallet: mockWallet, depositUsd: 2500 })]);
     expect(ctx.db.prepare('SELECT count(*) AS n FROM event_inbox').get().n).toBe(1);
+  });
+
+  it.each([
+    { openingUsd: 500, oldUsd: 1700, favorite: true, qualifies: false },
+    { openingUsd: 2000, oldUsd: 0, favorite: false, qualifies: true },
+  ])('checks a $openingUsd opening on its own when the wallet already has $oldUsd', async ({ openingUsd, oldUsd, favorite, qualifies }) => {
+    const ctx = fixture();
+    if (favorite) {
+      await discover(ctx);
+      ctx.db.prepare('UPDATE wallets SET is_favorite=1 WHERE address=?').run(mockWallet);
+    }
+    setMeta(ctx.db, 'public_snapshot_at', ctx.now - 1000);
+    const eventTime = Math.floor(ctx.now / 1000) * 1000;
+    ctx.providers.openPoolPositions = async (_wallet, _pool, at) => ({
+      positions: new Map([mockPosition, ...(oldUsd ? [SOL] : [])].map(position => [position, {
+        indexedAt: eventTime, position: { position_pubkey: position, wallet: mockWallet, pool: mockPool,
+          status: 'open', last_checked_at: at, deposit_usd: position === mockPosition ? openingUsd : oldUsd },
+      }])),
+    });
+    const add = { eventType: 'add', signature: mockSignature, positionAddress: mockPosition,
+      poolAddress: mockPool, userAddress: mockWallet, ixIndex: 1, totalUsd: String(openingUsd / 2) };
+    ctx.providers.positionAdds = async () => [add, add, { ...add, ixIndex: 2 },
+      { ...add, signature: SOL, totalUsd: '4000' }, { ...add, positionAddress: SOL, totalUsd: '4000' }];
+    enqueue(ctx.db, [mockSignature]);
+    await processPublicInbox(ctx, [mockPool]);
+    expect(ctx.db.prepare('SELECT last_error FROM event_inbox').pluck().get()).toBeNull();
+    expect(publicActivity(ctx.db)).toEqual(qualifies ? [expect.objectContaining({ openingDepositUsd: openingUsd })] : []);
   });
 
   it('ignores swap logs and only queues DLMM liquidity updates on the public stream', () => {
@@ -388,19 +425,118 @@ describe('dashboard and intelligence', () => {
     const send = vi.fn(async () => new Response(JSON.stringify({ ok: true })));
     vi.stubGlobal('fetch', send);
     cleanups.push(() => vi.unstubAllGlobals());
+    const filters = vi.spyOn(radarAlertFilters, 'load').mockReturnValue({ DEGEN: { enabled: true, enabledAt: 0 } });
+    cleanups.push(() => filters.mockRestore());
     const deliver = publicTelegramDelivery(ctx.db, ctx.logger, env);
     const at = Date.now();
     ctx.db.prepare('INSERT INTO public_activity_events VALUES (?,?,?,?)').run(mockSignature, mockPosition, at,
       JSON.stringify({ signature: mockSignature, position: mockPosition, timestamp: at, wallet: mockWallet, pool: mockPool, depositUsd: 2500 }));
     expect(whalePools(ctx.db)).toEqual([]);
     await deliver();
+    expect(send).not.toHaveBeenCalled();
+    savePublicOpening(ctx.db, { signature: mockSignature, position: mockPosition, timestamp: at,
+      wallet: mockWallet, pool: mockPool, depositUsd: 2500, openingDepositUsd: 2000,
+      alertMarket: { tier: 'DEGEN', mint: mockPosition, symbol: 'FIONA', marketCapUsd: 3000000 } });
+    await deliver();
     await deliver();
     expect(send).toHaveBeenCalledTimes(1);
     const message = JSON.parse(send.mock.calls[0][1].body);
-    expect(message).toMatchObject({ chat_id: '42', text: expect.stringContaining('US$2,500') });
+    expect(message).toMatchObject({ chat_id: '42', text: expect.stringContaining('Deposit pembukaan  US$2,000') });
+    expect(message.text).toContain('Posisi baru · DEGEN');
+    expect(message.text).toContain('Koin LP  FIONA\nMarket cap  US$3,000,000\n');
+    expect(message.text).not.toContain('US$2,500');
     expect(message.reply_markup.inline_keyboard[0][2].url).toBe('https://192.0.2.10:9443/web/wallets/' + mockWallet);
     expect(message.reply_markup.inline_keyboard[1]).toEqual([{ text: 'Copy CA', copy_text: { text: mockPosition } }]);
     expect(publicHealth(ctx.db).telegram).toMatchObject({ state: 'enabled', lastDeliveredAt: expect.any(Number) });
+  });
+
+  it('filters alert categories before batching and skips openings from before reactivation', async () => {
+    const ctx = fixture();
+    await discover(ctx);
+    const settings = { DEGEN: { enabled: false, enabledAt: 0 }, SEMI: { enabled: true, enabledAt: 0 }, SAVE: { enabled: true, enabledAt: 0 } };
+    const filters = vi.spyOn(radarAlertFilters, 'load').mockImplementation(() => settings);
+    let now = ctx.now;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const send = vi.fn(async () => {
+      now += 3000;
+      return new Response(JSON.stringify({ ok: true }));
+    });
+    vi.stubGlobal('fetch', send);
+    cleanups.push(() => { filters.mockRestore(); clock.mockRestore(); vi.unstubAllGlobals(); });
+    setMeta(ctx.db, 'public_telegram_since', ctx.now - 1000);
+    const deliver = publicTelegramDelivery(ctx.db, ctx.logger, { RADAR_PUBLIC_TELEGRAM: '1', TELEGRAM_BOT_TOKEN: 'test', ALLOWED_CHAT_ID: '42' });
+    const opening = (id, tier, timestamp) => savePublicOpening(ctx.db, { signature: mockSignature + id, position: mockPosition,
+      timestamp, wallet: mockWallet, pool: mockPool, openingDepositUsd: 2000, alertMarket: tier ? { tier, symbol: 'TOKEN' } : null });
+    for (let i = 0; i < 4; i++) opening(i, 'DEGEN', ctx.now - 100);
+    opening(4, null, ctx.now - 80);
+    opening(5, 'SEMI', ctx.now - 30);
+    opening(6, 'SAVE', ctx.now - 20);
+    await deliver();
+    expect(send.mock.calls.map(([, options]) => JSON.parse(options.body).text.split('\n')[0])).toEqual([
+      '🐋 Whale Radar · Posisi baru · SEMI', '🐋 Whale Radar · Posisi baru · SAVE',
+    ]);
+    settings.DEGEN = { enabled: true, enabledAt: ctx.now - 10 };
+    opening(7, 'DEGEN', ctx.now);
+    await deliver();
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(send.mock.calls[2][1].body).text).toContain('Posisi baru · DEGEN');
+  });
+
+  it('classifies by market cap, verifies majors by mint and uses the smaller exposure in non-quote pairs', () => {
+    const token = { tokenX: SOL, tokenY: mockPosition, tokenYSymbol: 'HYPE' };
+    const hype = '98sMhvDwXj1RQi5c5Mndm3vPe9cBqPrbLaufMXFNMh5g';
+    const caps = cap => new Map([[mockPosition, { marketCapUsd: cap }]]);
+    expect([9999999, 10000000, 50000000, 50000001].map(cap => classifyOpeningMarket(token, caps(cap)).tier))
+      .toEqual(['DEGEN', 'SEMI', 'SEMI', 'SAVE']);
+    expect(classifyOpeningMarket(token)).toBeNull();
+    expect(classifyOpeningMarket({ tokenX: USDC, tokenY: SOL })).toMatchObject({ tier: 'SAVE', mint: SOL });
+    expect(classifyOpeningMarket({ tokenX: SOL, tokenY: hype })).toMatchObject({ tier: 'SAVE', mint: hype });
+    expect(classifyOpeningMarket({ tokenX: hype, tokenY: mockPosition }, caps(5000000)))
+      .toMatchObject({ tier: 'DEGEN', mint: mockPosition });
+  });
+
+  it('reads market cap only from exact base-mint matches and prefers the deepest priced market', async () => {
+    const pair = (mint, liquidity, marketCap, fdv) => ({ chainId: 'solana', baseToken: { address: mint },
+      liquidity: { usd: liquidity }, marketCap, fdv });
+    const fetch = vi.fn(async () => new Response(JSON.stringify([
+      pair(SOL, 10000000, 80000000000), pair(mockPosition, 50000, 8000000),
+      pair(mockPosition, 100000, 11000000), pair(mockPosition, 200000, null, 100000000),
+    ])));
+    vi.stubGlobal('fetch', fetch);
+    cleanups.push(() => vi.unstubAllGlobals());
+    const result = await openingMarketLookup()([
+      { address: mockPool, tokenX: mockPosition, tokenY: SOL },
+      { address: USDC, tokenX: SOL, tokenY: USDC },
+    ]);
+    expect(String(fetch.mock.calls[0][0]).split('/').at(-1).split(',')).toEqual([mockPosition, SOL].sort());
+    expect(result.get(mockPool)).toMatchObject({ mint: mockPosition, tier: 'SEMI', marketCapUsd: 11000000 });
+    const alertMarket = result.get(USDC);
+    expect(alertMarket).toMatchObject({ mint: SOL, tier: 'SAVE', marketCapUsd: 80000000000 });
+    expect(publicTelegramMessage({ alertMarket, pool: { pair: 'SOL-USDC' } }, { source: 'Meteora' }).text)
+      .toContain('Koin LP  SOL · Aset mayor\nMarket cap  US$80,000,000,000\n');
+    expect(publicTelegramMessage({ alertMarket: { ...alertMarket, marketCapUsd: null }, pool: { pair: 'SOL-USDC' } },
+      { source: 'Meteora' }).text).toContain('Market cap  –\n');
+  });
+
+  it('categorizes pending openings during market refresh and shows all three sections in Openings', async () => {
+    const ctx = fixture(':memory:', { webPassword: await bcrypt.hash('private', 4) });
+    await discover(ctx);
+    setMeta(ctx.db, 'public_snapshot_at', ctx.now);
+    savePublicOpening(ctx.db, { signature: mockSignature, position: mockPosition, wallet: mockWallet,
+      pool: mockPool, timestamp: ctx.now, openingDepositUsd: 2000 });
+    ctx.providers.marketPools = async () => [{ address: mockPool, name: 'TOKEN-SOL', token_x: { address: mockPosition, symbol: 'TOKEN' },
+      token_y: { address: SOL } }];
+    ctx.providers.volume5m = async () => null;
+    ctx.providers.openingMarkets = async pools => new Map(pools.map(pool => [pool.address,
+      classifyOpeningMarket(pool, new Map([[mockPosition, { marketCapUsd: 15000000 }]]))]));
+    await refreshPublicMarket(ctx);
+    expect(publicActivity(ctx.db)[0].alertMarket).toMatchObject({ tier: 'SEMI', symbol: 'TOKEN' });
+    const app = createWeb(ctx);
+    cleanups.push(() => app.close());
+    const response = await app.inject({ url: '/web/alerts', headers: { authorization: 'Basic ' + Buffer.from('mock:private').toString('base64') } });
+    expect(response.statusCode).toBe(200);
+    for (const tier of ['DEGEN', 'SEMI', 'SAVE']) expect(response.body).toContain('<h2>' + tier + '</h2>');
+    expect(response.body).toContain('TOKEN <span class="badge">SEMI</span> $15M');
   });
 
   it('offers a separate copy button for each token in a pair without a quote mint', () => {
@@ -414,6 +550,24 @@ describe('dashboard and intelligence', () => {
       { text: 'Copy CA · AAA', copy_text: { text: mockPosition } },
       { text: 'Copy CA · BBB', copy_text: { text: mockPool } },
     ]);
+  });
+
+  it.each([
+    { side: 'SOL side', mints: [SOL], solIsX: true, lower: 0, active: 0, expected: '-0,99%' },
+    { side: 'Token side', mints: [mockPosition], solIsX: false, lower: 0, active: 0, expected: '+1%' },
+    { side: 'Double side', mints: [SOL, mockPosition], solIsX: false, lower: -1, active: 0, expected: '-0,99% s.d. +1%' },
+    { side: 'SOL side', mints: [SOL], solIsX: false, lower: -1, active: null, expected: '–' },
+  ])('shows $side and opening range $expected in the public Telegram alert', async ({ side, mints, solIsX, lower, active, expected }) => {
+    const ctx = fixture();
+    await discover(ctx);
+    const [tokenX, tokenY] = solIsX ? [SOL, mockPosition] : [mockPosition, SOL];
+    snapshot(ctx.db, { address: mockPool, name: 'TOKEN-SOL', binStep: 100, tokenX, tokenY }, ctx.now);
+    savePublicOpening(ctx.db, { signature: mockSignature, position: mockPosition, wallet: mockWallet,
+      pool: mockPool, timestamp: ctx.now, openingDepositUsd: 2000, openingBins: { lower, upper: 1, active },
+      transfers: mints.map(mint => ({ mint, amount: '100' })) });
+    const report = radarReport(ctx.db);
+    const { text } = publicTelegramMessage(report.openings[0], report);
+    expect(text).toContain('Sisi deposit  ' + side + '\nRange pembukaan  ' + expected + '\n');
   });
 
   it('uses an archived opening instruction when the current position has no funded bins', async () => {
@@ -520,8 +674,8 @@ describe('dashboard and intelligence', () => {
     setMeta(ctx.db, 'public_worker_heartbeat', Date.now());
     setMeta(ctx.db, 'public_stream_state', 'connected');
     setMeta(ctx.db, 'public_market_at', Date.now());
-    setMeta(ctx.db, 'public_activity', JSON.stringify([{ signature: mockSignature, position: mockPosition, wallet: mockWallet,
-      pool: mockPool, timestamp: Date.now(), label: 'BIDASK' }]));
+    savePublicOpening(ctx.db, { signature: mockSignature, position: mockPosition, wallet: mockWallet,
+      pool: mockPool, timestamp: Date.now(), label: 'BIDASK', depositUsd: 2250, openingDepositUsd: 2100 });
     await refreshIntel(ctx);
     const app = createWeb(ctx);
     cleanups.push(() => app.close());
@@ -534,10 +688,10 @@ describe('dashboard and intelligence', () => {
     expect(body).toMatchObject({ agentId: 'alert', status: 'ok', metrics: { candidates: [] }, events: [] });
     const radar = body.metrics.whaleRadar;
     expect(radar.totals).toMatchObject({ wallets: 1, pools: 1, depositUsd: 2250 });
-    expect(radar.openings[0]).toMatchObject({ verification: 'observed_whale', walletDepositUsd: 2250,
+    expect(radar.openings[0]).toMatchObject({ verification: 'observed_whale', walletDepositUsd: 2250, openingDepositUsd: 2100,
       pool: { binStep: 50, baseFeePct: 1, dynamicFeePct: 1.2 } });
     const message = publicTelegramMessage(radar.openings[0], radar);
-    expect(message.text).toContain('US$2,250');
+    expect(message.text).toContain('Deposit pembukaan  US$2,100');
     expect(message.text).toContain('Bin Step 50 · Base fee 1% · Dynamic fee 1.2%');
     expect(message.reply_markup.inline_keyboard[0][1].url).toBe(radar.openings[0].transactionUrl);
   });

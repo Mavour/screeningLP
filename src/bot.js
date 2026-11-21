@@ -9,6 +9,7 @@ const userConfig = require("./state/userConfig.store");
 const lastScan = require("./state/lastScan.store");
 const seenPools = require("./state/seenPools.store");
 const kolWallets = require("./state/kolWallets.store");
+const radarAlertFilters = require("./state/radarAlertFilters.store");
 const { runScan } = require("./scanner");
 
 const pendingInput = new Map();
@@ -81,6 +82,7 @@ function mainKeyboard() {
       { text: "📡 Discovery", callback_data: "cat:Discovery" },
     ],
     [{ text: "★ KOL avoid / green", callback_data: "kol" }, { text: "🐋 Whale Radar", callback_data: "radar-web" }],
+    [{ text: "🔔 Filter alert Whale Radar", callback_data: "radar-filters" }],
     [{ text: "↺ Reset default", callback_data: "reset" }],
   ];
 }
@@ -128,6 +130,18 @@ async function renderMenu(chatId, messageId) {
     mainKeyboard(),
     messageId
   );
+}
+
+function renderRadarFilters(chatId, messageId, filters = radarAlertFilters.load()) {
+  pendingInput.delete(chatId);
+  return telegram.show(chatId, [
+    "<b>Filter alert Whale Radar</b>",
+    "DEGEN · Market cap &lt; US$10 juta",
+    "SEMI · Market cap US$10–50 juta",
+    "SAVE · Market cap &gt; US$50 juta atau aset mayor",
+  ].join("\n"), [radarAlertFilters.TIERS.map(tier => ({
+    text: `${tier} ${filters[tier].enabled ? "ON" : "OFF"}`, callback_data: `radar-filter:${tier}`,
+  })), ...backMenu()], messageId);
 }
 
 async function renderStatus(chatId, messageId) {
@@ -253,6 +267,12 @@ async function handleCallback(query) {
     if (data === "menu") return renderMenu(chatId, messageId);
     if (data === "status") return renderStatus(chatId, messageId);
     if (data === "radar-web") return renderRadarWeb(chatId, messageId);
+    if (data === "radar-filters") return await renderRadarFilters(chatId, messageId);
+    if (data.startsWith("radar-filter:")) {
+      const tier = data.slice("radar-filter:".length);
+      if (!radarAlertFilters.TIERS.includes(tier)) return;
+      return await renderRadarFilters(chatId, messageId, radarAlertFilters.toggle(tier));
+    }
     if (data === "pools") return renderPools(chatId, messageId);
     if (data === "scan") return runScanFromMenu(chatId, messageId);
     if (data === "kol") return renderKol(chatId, messageId);

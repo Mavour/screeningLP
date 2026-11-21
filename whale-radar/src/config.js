@@ -8,6 +8,7 @@ export const SOL = 'So11111111111111111111111111111111111111112';
 export const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 export const DAY = 86_400_000;
 export const WHALE_DEPOSIT_USD = 2000;
+export const PUBLIC_OPENING_MIN_USD = 2000;
 export const finite = value => {
   if (value == null || (typeof value !== 'number' && typeof value !== 'string') || String(value).trim() === '') return null;
   const n = Number(value);

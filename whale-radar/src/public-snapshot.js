@@ -2,11 +2,12 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import bs58 from 'bs58';
 import { PublicKey } from '@solana/web3.js';
-import { SOL, USDC, DAY, WHALE_DEPOSIT_USD, finite } from './config.js';
+import { SOL, USDC, DAY, PUBLIC_OPENING_MIN_USD, WHALE_DEPOSIT_USD, finite } from './config.js';
 import { http, parallel, url } from './clients/http.js';
 import { normalizePool } from './clients/providers.js';
-import { getMeta, openDb, refreshProfile, savePublicPosition, setMeta, snapshot, touchWallet } from './db.js';
+import { getMeta, latestPools, openDb, publicActivity, refreshProfile, savePublicOpening, savePublicPosition, setMeta, snapshot, touchWallet } from './db.js';
 import { DLMM, MAX_TRANSACTION_VERSION, PROGRAM, isAddress, parsePositions } from './strategy/instructions.js';
+import { classifyOpeningMarket, openingMarketLookup } from './opening-market.js';
 
 const endpoint = 'https://dlmm.datapi.meteora.ag';
 const rpcEndpoint = process.env.RADAR_PUBLIC_RPC_URL || 'https://solana-rpc.publicnode.com';
@@ -14,6 +15,7 @@ const meteora = http('meteora public API', { rpm: 300, timeout: 6000, retries: 1
 const solana = http('solana public RPC', { rpm: 100, timeout: 6000, retries: 0 });
 const positionRpc = http('solana public position RPC', { rpm: 30, timeout: 12000, retries: 0 });
 const get = (path, params) => meteora(url(endpoint, path, params));
+const addEventsQuery = { event_type: 'add', order_direction: 'asc' };
 const rpc = async (method, params) => {
   const data = await solana(rpcEndpoint, { method: 'POST', body: { jsonrpc: '2.0', id: 1, method, params } });
   if (data.error) throw new Error('Public RPC rejected ' + method);
@@ -28,6 +30,31 @@ export function assertPublicDatabase(db) {
   if (!getMeta(db, 'public_snapshot_at') && db.prepare('SELECT 1 FROM wallets LIMIT 1').get()) {
     throw new Error('Set RADAR_DB to a separate public preview database');
   }
+}
+
+export function openingDepositUsd(events, signature, position, pool, wallet) {
+  if (!Array.isArray(events)) return null;
+  const amounts = new Map();
+  for (const event of events) {
+    if (event.eventType !== 'add' || event.signature !== signature || event.positionAddress !== position ||
+      event.poolAddress !== pool || event.userAddress !== wallet) continue;
+    const usd = finite(event.totalUsd);
+    if (usd == null || usd < 0 || !Number.isInteger(event.ixIndex)) return null;
+    if (amounts.has(event.ixIndex) && amounts.get(event.ixIndex) !== usd) return null;
+    amounts.set(event.ixIndex, usd);
+  }
+  const total = [...amounts.values()].reduce((sum, amount) => sum + amount, 0);
+  return amounts.size && Number.isFinite(total) ? total : null;
+}
+
+export function serializePublicOpening(event, wallet, signature, timestamp) {
+  return {
+    wallet, pool: event.pool, position: event.position, label: event.label, signature, timestamp, kind: event.kind,
+    openingBins: { lower: event.lower ?? null, upper: event.upper ?? null, active: event.activeBin },
+    transfers: [...event.amounts].map(([mint, amount]) => ({
+      mint, amount: amount.toString(), decimals: event.decimals.get(mint) ?? null,
+    })),
+  };
 }
 
 export function publicStreamProviders(signal) {
@@ -50,6 +77,7 @@ export function publicStreamProviders(signal) {
     return liveMeteora(url(endpoint, path, params), { ttl });
   };
   return {
+    openingMarkets: openingMarketLookup(signal),
     websocketUrl: () => process.env.RADAR_PUBLIC_WS_URL || 'wss://api.mainnet-beta.solana.com',
     signatures: (address, options) => read('getSignaturesForAddress', [address, { ...options, commitment: 'confirmed' }]),
     async transaction(signature) {
@@ -71,6 +99,10 @@ export function publicStreamProviders(signal) {
       return data.data;
     },
     marketPool: address => readIndex('/pools/' + address, {}),
+    async positionAdds(position) {
+      const data = await readIndex('/positions/' + position + '/historical', addEventsQuery);
+      return data.events;
+    },
     async volume5m(address, now) {
       const end = Math.floor(now / 300000) * 300;
       const data = await readIndex('/pools/' + address + '/volume/history',
@@ -112,8 +144,23 @@ export async function refreshPublicMarket({ db, providers, logger, signal }, now
   signal?.throwIfAborted();
   const results = rows.flatMap(row => row.value ? [row.value] : []);
   if (!results.length) throw new Error('No market updates available');
+  const pending = publicActivity(db).filter(event => event.alertMarket?.marketCapUsd == null);
+  const metadata = new Map([...latestPools(db), ...results.map(row => row.metrics)].map(pool => [pool.address, pool]));
+  const pendingPools = [...new Set(pending.map(event => event.pool))].map(address => metadata.get(address)).filter(Boolean);
+  const markets = pendingPools.length ? await providers.openingMarkets(pendingPools).catch(error => {
+    logger.warn({ reason: error.message }, 'Opening market cap refresh unavailable');
+    return new Map(pendingPools.map(pool => [pool.address, classifyOpeningMarket(pool)]));
+  }) : new Map();
+  signal?.throwIfAborted();
   db.transaction(() => {
     for (const { metrics } of results) snapshot(db, metrics, now);
+    const categorize = db.prepare(`UPDATE public_activity_events SET detail=json_set(detail,'$.alertMarket',json(?))
+      WHERE signature=? AND position=? AND (json_extract(detail,'$.alertMarket') IS NULL OR
+        (json_extract(detail,'$.alertMarket.marketCapUsd') IS NULL AND json_extract(detail,'$.alertMarket.mint')=? AND ? IS NOT NULL))`);
+    for (const event of pending) {
+      const market = markets.get(event.pool);
+      if (market) categorize.run(JSON.stringify(market), event.signature, event.position, market.mint, market.marketCapUsd);
+    }
     const tokens = results.flatMap(({ raw }) => [raw.token_x, raw.token_y]);
     for (const [mint, key] of [[SOL, 'sol_usd'], [USDC, 'usdc_usd']]) {
       const token = tokens.find(item => item?.address === mint && finite(item.price) > 0);
@@ -217,13 +264,8 @@ async function sampledActivity(pools) {
       const tx = await rpc('getTransaction', [signature, { encoding: 'jsonParsed', commitment: 'confirmed',
         maxSupportedTransactionVersion: MAX_TRANSACTION_VERSION }]);
       if (tx?.transaction?.signatures?.[0] !== signature || !tx.blockTime) return [];
-      return parsePositions(tx).filter(event => event.kind === 'opened' && event.owner && event.amounts.size).map(event => {
-        const transfers = [...event.amounts].map(([mint, amount]) => ({
-          mint, amount: amount.toString(), decimals: event.decimals.get(mint) ?? null,
-        }));
-        return { wallet: event.owner, position: event.position, pool: event.pool, label: event.label,
-          signature, timestamp: tx.blockTime * 1000, transfers };
-      });
+      return parsePositions(tx).filter(event => event.kind === 'opened' && event.owner && event.amounts.size)
+        .map(event => serializePublicOpening(event, event.owner, signature, tx.blockTime * 1000));
     });
     actions.push(...results.flatMap(result => result.value ?? []));
   }
@@ -282,22 +324,26 @@ async function qualifyingOpenings(positions, observed) {
   }
   const eligible = [...groups.values()].flatMap(rows => {
     const depositUsd = rows.reduce((sum, row) => sum + (row.deposit_usd ?? 0), 0);
-    return depositUsd > WHALE_DEPOSIT_USD ? rows.map(row => ({ row, depositUsd })) : [];
+    return depositUsd >= PUBLIC_OPENING_MIN_USD ? rows.map(row => ({ row, depositUsd })) : [];
   });
   const results = await parallel(eligible.slice(0, 24), 4, async ({ row, depositUsd }) => {
-    if (observed.has(row.position_pubkey)) return { ...observed.get(row.position_pubkey), depositUsd };
-    const result = await get('/positions/' + row.position_pubkey + '/historical', { event_type: 'add', order_direction: 'asc' });
+    const result = await get('/positions/' + row.position_pubkey + '/historical', addEventsQuery);
     const initial = result.events?.find(event => event.eventType === 'add' && event.signature);
     if (!initial) return null;
+    const amount = openingDepositUsd(result.events, initial.signature, row.position_pubkey, row.pool, row.wallet);
+    if (amount == null || amount < PUBLIC_OPENING_MIN_USD) return null;
+    const sampled = observed.get(row.position_pubkey);
+    if (sampled?.signature === initial.signature && sampled.wallet === row.wallet && sampled.pool === row.pool) {
+      return { ...sampled, depositUsd, openingDepositUsd: amount };
+    }
     const tx = await rpc('getTransaction', [initial.signature, { encoding: 'jsonParsed', commitment: 'confirmed',
       maxSupportedTransactionVersion: MAX_TRANSACTION_VERSION }]);
     if (tx?.transaction?.signatures?.[0] !== initial.signature || !tx.blockTime) return null;
-    const opening = parsePositions(tx).find(event => event.kind === 'opened' && event.position === row.position_pubkey && event.owner === row.wallet);
+    const opening = parsePositions(tx).find(event => event.kind === 'opened' && event.amounts.size &&
+      event.position === row.position_pubkey && event.pool === row.pool && event.owner === row.wallet);
     if (!opening) return null;
-    const transfers = [...opening.amounts].map(([mint, amount]) =>
-      ({ mint, amount: amount.toString(), decimals: opening.decimals.get(mint) ?? null }));
-    return { wallet: row.wallet, position: row.position_pubkey, pool: row.pool, label: opening.label,
-      signature: initial.signature, timestamp: tx.blockTime * 1000, transfers, depositUsd };
+    return { ...serializePublicOpening(opening, row.wallet, initial.signature, tx.blockTime * 1000),
+      depositUsd, openingDepositUsd: amount };
   });
   return results.map(result => result.value).filter(Boolean).sort((a, b) => b.timestamp - a.timestamp);
 }
@@ -373,8 +419,7 @@ export async function refreshPublicSnapshot(db, { signal } = {}) {
     setMeta(db, 'public_sample_pairs', scan.pairs);
     setMeta(db, 'public_sample_owners', JSON.stringify(scan.owners));
     setMeta(db, 'public_watch_pools', JSON.stringify(sampledPools.map(pool => pool.address)));
-    const recordOpening = db.prepare('INSERT OR IGNORE INTO public_activity_events(signature,position,happened_at,detail) VALUES (?,?,?,?)');
-    for (const event of openings) recordOpening.run(event.signature, event.position, event.timestamp, JSON.stringify(event));
+    for (const event of openings) savePublicOpening(db, event);
   }).immediate();
   return { pools: allPools.size, wallets: wallets.length,
     positions: positions.length, openings: openings.length, scannedPools: scan.pools, sampledPairs: scan.pairs, fallback };

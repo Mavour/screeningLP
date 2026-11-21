@@ -38,6 +38,14 @@ export function priceRange(lower, upper, step, dx, dy) {
   return { min_price: low, max_price: high, width_pct: low && high ? 100 * (high / low - 1) : null };
 }
 
+export function relativePriceRange(lower, upper, active, step, inverted) {
+  if (![lower, upper, active, step].every(Number.isInteger) || lower > upper || step <= 0) return null;
+  const logStep = Math.log1p(step / 10000);
+  const min = 100 * Math.expm1((inverted ? active - upper : lower - active) * logStep);
+  const max = 100 * Math.expm1((inverted ? active - lower : upper - active) * logStep);
+  return Number.isFinite(min) && Number.isFinite(max) ? { min, max } : null;
+}
+
 export function mergeLabels(...labels) {
   const parts = new Set(labels.filter(Boolean).flatMap(label => label.split('+')));
   return ['BIDASK', 'CURVE', 'SPOT', 'MIXED'].filter(part => parts.has(part)).join('+') || null;

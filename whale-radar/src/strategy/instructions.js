@@ -5,7 +5,7 @@ import { mergeLabels } from './distribution.js';
 
 const require = createRequire(import.meta.url);
 // Anchor exposes BN through its CommonJS object, which Node may not detect as a named export.
-const { BN, BorshAccountsCoder, BorshInstructionCoder } = anchor;
+const { BN, BorshAccountsCoder, BorshEventCoder, BorshInstructionCoder } = anchor;
 // The SDK's CJS entry works under Node 20+ without its extensionless ESM imports.
 export const DLMM = require('@meteora-ag/dlmm');
 export const { IDL } = DLMM;
@@ -13,6 +13,8 @@ export const PROGRAM = IDL.address;
 export const MAX_TRANSACTION_VERSION = 1;
 const coder = new BorshInstructionCoder(IDL);
 const accountsCoder = new BorshAccountsCoder(IDL);
+const eventCoder = new BorshEventCoder(IDL);
+const eventCpiTag = Buffer.from('e445a52e51cb9a1d', 'hex');
 const specs = new Map(IDL.instructions.map(spec => [spec.name, spec]));
 const tokenPrograms = new Set(['spl-token', 'spl-token-2022']);
 const readKey = value => typeof value === 'string' ? value : value?.pubkey;
@@ -90,11 +92,30 @@ function transfers(children, accounts) {
   return amounts;
 }
 
+function openingActiveBins(scoped) {
+  const bins = new Map();
+  for (const { instruction: ix } of scoped) {
+    if (ix.programId !== PROGRAM || ix.accounts?.length !== 1 || typeof ix.data !== 'string') continue;
+    try {
+      const bytes = Buffer.from(bs58.decode(ix.data));
+      if (!bytes.subarray(0, eventCpiTag.length).equals(eventCpiTag)) continue;
+      const event = eventCoder.decode(bytes.subarray(eventCpiTag.length).toString('base64'));
+      if (event?.name !== 'AddLiquidity') continue;
+      const { lb_pair, position, active_bin_id } = event.data;
+      const key = lb_pair.toBase58() + ':' + position.toBase58();
+      if (!bins.has(key)) bins.set(key, active_bin_id);
+    } catch { /* Ignore undecodable event data. */ }
+  }
+  return bins;
+}
+
 export function parsePositions(tx) {
   if (!tx?.meta || tx.meta.err || !Array.isArray(tx.transaction?.message?.instructions)) return [];
-  const instructions = scope(tx).map(row => ({ ...row, decoded: decodeInstruction(row.instruction) })).filter(row => row.decoded);
+  const scoped = scope(tx);
+  const instructions = scoped.map(row => ({ ...row, decoded: decodeInstruction(row.instruction) })).filter(row => row.decoded);
   const initial = new Map(instructions.filter(row => row.decoded.name.startsWith('initialize_position'))
     .map(({ decoded }) => [decoded.accounts.position, decoded]));
+  const activeBins = initial.size ? openingActiveBins(scoped) : new Map();
   const decimals = new Map([...tx.meta.preTokenBalances ?? [], ...tx.meta.postTokenBalances ?? []]
     .filter(row => Number.isInteger(row.uiTokenAmount?.decimals)).map(row => [row.mint, row.uiTokenAmount.decimals]));
   const groups = new Map();
@@ -105,6 +126,7 @@ export function parsePositions(tx) {
     const row = groups.get(a.position) ?? {
       position: a.position, pool: a.lb_pair, owner: open?.accounts.owner, sender: a.sender,
       kind: open ? 'opened' : 'added', lower: open?.lower ?? decoded.lower, upper: open?.upper ?? decoded.upper,
+      activeBin: activeBins.get(a.lb_pair + ':' + a.position) ?? null,
       label: null, amounts: new Map(), decimals,
     };
     row.label = mergeLabels(row.label, decoded.label);

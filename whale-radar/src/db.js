@@ -1,7 +1,7 @@
 import SQLite from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { WHALE_DEPOSIT_USD } from './config.js';
+import { PUBLIC_OPENING_MIN_USD, WHALE_DEPOSIT_USD } from './config.js';
 
 const migrations = [
   `CREATE TABLE wallets (
@@ -199,18 +199,19 @@ export function savePublicPosition(db, row) {
   if (!prior || row.last_checked_at >= prior.last_checked_at) savePosition(db, row);
 }
 
+export function savePublicOpening(db, event) {
+  db.prepare(`INSERT INTO public_activity_events(signature,position,happened_at,detail) VALUES (?,?,?,?)
+    ON CONFLICT(signature,position) DO UPDATE SET detail=excluded.detail
+    WHERE json_extract(public_activity_events.detail,'$.openingDepositUsd') IS NULL`)
+    .run(event.signature, event.position, event.timestamp, JSON.stringify(event));
+}
+
 export function publicActivity(db) {
-  const match = db.prepare('SELECT deposit_usd FROM whale_deposits WHERE wallet=? AND pool=?');
-  const legacy = JSON.parse(getMeta(db, 'public_activity') ?? '[]').flatMap(row => {
-    const qualification = match.get(row.wallet, row.pool);
-    return qualification ? [{ ...row, depositUsd: qualification.deposit_usd }] : [];
-  });
-  const recent = db.prepare(`SELECT e.detail FROM public_activity_events e
+  return db.prepare(`SELECT e.detail FROM public_activity_events e
     JOIN wallets w ON w.address=json_extract(e.detail,'$.wallet') AND w.is_blacklisted=0
-    ORDER BY e.happened_at DESC LIMIT 200`).all()
-    .map(row => ({ depositUsd: null, ...JSON.parse(row.detail) }));
-  return [...new Map([...legacy, ...recent].map(row => [row.signature + ':' + row.position, row])).values()]
-    .sort((a, b) => b.timestamp - a.timestamp).slice(0, 200);
+    WHERE json_extract(e.detail,'$.openingDepositUsd')>=?
+    ORDER BY e.happened_at DESC LIMIT 200`).all(PUBLIC_OPENING_MIN_USD)
+    .map(row => JSON.parse(row.detail));
 }
 
 export function scheduleWallet(db, address, dueAt) {
