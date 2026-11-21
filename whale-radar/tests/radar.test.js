@@ -522,21 +522,40 @@ describe('dashboard and intelligence', () => {
     const ctx = fixture(':memory:', { webPassword: await bcrypt.hash('private', 4) });
     await discover(ctx);
     setMeta(ctx.db, 'public_snapshot_at', ctx.now);
-    savePublicOpening(ctx.db, { signature: mockSignature, position: mockPosition, wallet: mockWallet,
-      pool: mockPool, timestamp: ctx.now, openingDepositUsd: 2000 });
+    const stored = { signature: mockSignature, position: mockPosition, wallet: mockWallet,
+      pool: mockPool, timestamp: ctx.now, depositUsd: 5000 };
+    const smallPosition = SOL;
+    savePublicOpening(ctx.db, stored);
+    savePublicOpening(ctx.db, { ...stored, position: smallPosition });
     ctx.providers.marketPools = async () => [{ address: mockPool, name: 'TOKEN-SOL', token_x: { address: mockPosition, symbol: 'TOKEN' },
       token_y: { address: SOL } }];
     ctx.providers.volume5m = async () => null;
+    ctx.providers.positionAdds = async position => [{ eventType: 'add', signature: mockSignature, positionAddress: position,
+      poolAddress: mockPool, userAddress: mockWallet, ixIndex: 0, totalUsd: position === mockPosition ? '2000' : '500' }];
     ctx.providers.openingMarkets = async pools => new Map(pools.map(pool => [pool.address,
       classifyOpeningMarket(pool, new Map([[mockPosition, { marketCapUsd: 15000000 }]]))]));
     await refreshPublicMarket(ctx);
-    expect(publicActivity(ctx.db)[0].alertMarket).toMatchObject({ tier: 'SEMI', symbol: 'TOKEN' });
+    expect(publicActivity(ctx.db)).toEqual([expect.objectContaining({ position: mockPosition, openingDepositUsd: 2000,
+      alertMarket: expect.objectContaining({ tier: 'SEMI', symbol: 'TOKEN' }) })]);
     const app = createWeb(ctx);
     cleanups.push(() => app.close());
     const response = await app.inject({ url: '/web/alerts', headers: { authorization: 'Basic ' + Buffer.from('mock:private').toString('base64') } });
     expect(response.statusCode).toBe(200);
     for (const tier of ['DEGEN', 'SEMI', 'SAVE']) expect(response.body).toContain('<h2>' + tier + '</h2>');
     expect(response.body).toContain('TOKEN <span class="badge">SEMI</span> $15M');
+    expect(response.body.match(/<table>/g)).toHaveLength(1);
+  });
+
+  it('shows one empty state instead of opening tables when no deposits qualify', async () => {
+    const ctx = fixture(':memory:', { webPassword: await bcrypt.hash('private', 4) });
+    setMeta(ctx.db, 'public_snapshot_at', ctx.now);
+    const app = createWeb(ctx);
+    cleanups.push(() => app.close());
+    const response = await app.inject({ url: '/web/alerts', headers: { authorization: 'Basic ' + Buffer.from('mock:private').toString('base64') } });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain('at least US$2,000 in one transaction');
+    expect(response.body).toContain('No qualifying openings have been verified yet.');
+    expect(response.body).not.toContain('<table>');
   });
 
   it('offers a separate copy button for each token in a pair without a quote mint', () => {

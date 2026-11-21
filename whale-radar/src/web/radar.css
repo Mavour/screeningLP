@@ -83,6 +83,8 @@ small { color: var(--muted); }
 .panel-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; align-items: center; padding: 17px 16px; }
 .panel-heading a, .exports a, .external { font-size: 12px; font-weight: 570; }
 .panel .scroll { border: 0; border-radius: 0; }
+.opening-sections { display: grid; gap: 16px; }
+.openings-empty { margin: 0; padding: 16px; color: var(--muted); }
 .scroll { overflow: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); scrollbar-color: #3d6883 #0b263a; }
 table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
 td, th { min-height: 45px; padding: 11px 13px; text-align: left; white-space: nowrap; }

@@ -6,7 +6,7 @@ import rateLimit from '@fastify/rate-limit';
 import formbody from '@fastify/formbody';
 import bcrypt from 'bcryptjs';
 import radarAlertFilters from '../../../src/state/radarAlertFilters.store.js';
-import { DAY } from '../config.js';
+import { DAY, PUBLIC_OPENING_MIN_USD } from '../config.js';
 import { getMeta, latestPools, publicActivity, scheduleWallet } from '../db.js';
 import { trending, whalePools } from '../intel/pools.js';
 import { isAddress, isSignature } from '../strategy/instructions.js';
@@ -74,7 +74,8 @@ const descriptions = {
   'Pools with tracked wallets': 'Open liquidity positions grouped by pool.',
   'Trending pools': 'Pools ranked by fees, volume momentum, liquidity, and wallet activity.',
   Alerts: 'Position openings and liquidity additions recorded by Whale Radar.',
-  'Observed openings': 'Confirmed Meteora position openings sampled directly from Solana.',
+  'Observed openings': 'Confirmed Meteora position openings with a deposit of at least US' +
+    usd(PUBLIC_OPENING_MIN_USD) + ' in one transaction.',
   'Smart LP leaderboard': 'Radar ranking, source ranks, and results from the fixed follow-up window.',
 };
 
@@ -692,12 +693,20 @@ export function createWeb({ db, settings, tools }) {
     const pool = req.query.pool;
     if (req.publicMode) {
       const openings = publicActivity(db);
+      if (!openings.length) {
+        const message = req.publicHealth?.status === 'syncing' ? 'Waiting for the first pool scan.' :
+          'No qualifying openings have been verified yet.';
+        return page(reply, req, 'Observed openings', '<p class="panel openings-empty">' + message + '</p>');
+      }
       const pools = new Map(latestPools(db).map(item => [item.address, item]));
       const pending = openings.filter(row => !row.alertMarket);
-      const sections = radarAlertFilters.TIERS.map(tier => panel(tier, '',
-        publicActivityTable(req, openings.filter(row => row.alertMarket?.tier === tier), pools)));
+      const sections = radarAlertFilters.TIERS.map(tier => {
+        const rows = openings.filter(row => row.alertMarket?.tier === tier);
+        return panel(tier, '', rows.length ? publicActivityTable(req, rows, pools) :
+          '<p class="openings-empty">No verified openings in this category.</p>');
+      });
       if (pending.length) sections.push(panel('Pending market cap', '', publicActivityTable(req, pending, pools)));
-      return page(reply, req, 'Observed openings', sections.join(''));
+      return page(reply, req, 'Observed openings', '<div class="opening-sections">' + sections.join('') + '</div>');
     }
     const clauses = ['sent_at IS NOT NULL'];
     const args = [];

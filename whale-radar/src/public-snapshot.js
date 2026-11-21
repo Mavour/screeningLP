@@ -131,6 +131,34 @@ export function publicStreamProviders(signal) {
   };
 }
 
+async function verifyStoredOpenings({ db, providers, logger, signal }, now) {
+  const pending = db.prepare(`SELECT e.signature,e.position,json_extract(e.detail,'$.pool') AS pool,w.address AS wallet
+    FROM public_activity_events e JOIN wallets w ON w.address=json_extract(e.detail,'$.wallet') AND w.is_blacklisted=0
+    WHERE json_extract(e.detail,'$.openingDepositUsd') IS NULL
+      AND coalesce(json_extract(e.detail,'$.openingDepositCheckedAt'),0)<=?
+    ORDER BY json_extract(e.detail,'$.openingDepositCheckedAt'),e.happened_at DESC LIMIT 12`).all(now - 15 * 60000);
+  if (!pending.length) return;
+  const results = await parallel(pending, 4, async ({ position, signature, pool, wallet }) => {
+    const events = await providers.positionAdds(position);
+    return openingDepositUsd(events, signature, position, pool, wallet);
+  });
+  signal?.throwIfAborted();
+  const update = db.prepare(`UPDATE public_activity_events
+    SET detail=json_set(detail,'$.openingDepositCheckedAt',?,'$.openingDepositUsd',?)
+    WHERE signature=? AND position=? AND json_extract(detail,'$.openingDepositUsd') IS NULL`);
+  db.transaction(() => {
+    let qualified = false;
+    for (const [i, { signature, position }] of pending.entries()) {
+      const amount = results[i].value ?? null;
+      const { changes } = update.run(now, amount, signature, position);
+      if (changes && amount >= PUBLIC_OPENING_MIN_USD) qualified = true;
+    }
+    if (qualified) setMeta(db, 'public_last_verified_at', Date.now());
+  }).immediate();
+  const failed = results.filter(row => row.error).length;
+  if (failed) logger.warn({ failed, checked: pending.length }, 'Stored opening verification incomplete');
+}
+
 export async function refreshPublicMarket({ db, providers, logger, signal }, now = Date.now()) {
   const listed = await providers.marketPools();
   const pools = new Map(listed.map(row => [row.address, row]));
@@ -144,6 +172,7 @@ export async function refreshPublicMarket({ db, providers, logger, signal }, now
   signal?.throwIfAborted();
   const results = rows.flatMap(row => row.value ? [row.value] : []);
   if (!results.length) throw new Error('No market updates available');
+  await verifyStoredOpenings({ db, providers, logger, signal }, now);
   const pending = publicActivity(db).filter(event => event.alertMarket?.marketCapUsd == null);
   const metadata = new Map([...latestPools(db), ...results.map(row => row.metrics)].map(pool => [pool.address, pool]));
   const pendingPools = [...new Set(pending.map(event => event.pool))].map(address => metadata.get(address)).filter(Boolean);
