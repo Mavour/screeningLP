@@ -15,14 +15,18 @@ function marketMints(pool) {
   return nonStable.length ? nonStable : mints;
 }
 
+const indexedCap = (pool, mint) => mint === pool.tokenX ? pool.marketCapXUsd : pool.marketCapYUsd;
+
 export function classifyOpeningMarket(pool, caps = new Map()) {
   const markets = marketMints(pool).map(mint => {
     const token = caps.get(mint);
     const isMajor = majorMints.has(mint);
-    const cap = token?.marketCapUsd ?? null;
+    const meteoraCap = indexedCap(pool, mint);
+    const cap = meteoraCap > 0 ? meteoraCap : token?.marketCapUsd ?? null;
+    const marketCapSource = meteoraCap > 0 ? 'Meteora' : cap > 0 ? 'DEX Screener' : null;
     const tier = isMajor || cap > 50_000_000 ? 'SAVE' : cap >= 10_000_000 ? 'SEMI' : cap > 0 ? 'DEGEN' : null;
     const symbol = majorMints.get(mint) || (mint === pool.tokenX ? pool.tokenXSymbol : pool.tokenYSymbol) || token?.symbol || null;
-    return { mint, symbol, marketCapUsd: cap, tier, isMajor };
+    return { mint, symbol, marketCapUsd: cap, marketCapSource, tier, isMajor };
   });
   if (!markets.length || markets.some(market => !market.tier)) return null;
   // For a pair of non-quote assets, the smaller exposure drives the category.
@@ -33,7 +37,7 @@ export function classifyOpeningMarket(pool, caps = new Map()) {
 export function openingMarketLookup(signal) {
   const request = http('dex screener market cap', { rpm: 120, timeout: 4000, retries: 1, signal });
   return async pools => {
-    const mints = [...new Set(pools.flatMap(marketMints))].sort();
+    const mints = [...new Set(pools.flatMap(pool => marketMints(pool).filter(mint => !(indexedCap(pool, mint) > 0))))].sort();
     const caps = new Map();
     for (let offset = 0; offset < mints.length; offset += 30) {
       const batch = mints.slice(offset, offset + 30);

@@ -13,6 +13,7 @@ import { isAddress, isSignature } from '../strategy/instructions.js';
 import { smartLpStatus } from '../discovery/smart-lp.js';
 import { publicSmartLpReport, resetSmartLpFavorite } from '../discovery/public-leaderboard.js';
 import { agentDormSnapshot, publicHealth, radarReport } from '../radar-report.js';
+import { classifyOpeningMarket } from '../opening-market.js';
 import { enqueue, webhookSignatures } from '../realtime/worker.js';
 
 const css = readFileSync(new URL('./radar.css', import.meta.url), 'utf8');
@@ -263,6 +264,11 @@ function rangeMarketCaps(db) {
   return cache?.at >= Date.now() - 10 * 60000 ? cache.byPool : {};
 }
 
+function rangeMarket(pool, cached) {
+  const indexed = pool?.takenAt >= Date.now() - 10 * 60000 ? classifyOpeningMarket(pool) : null;
+  return indexed?.marketCapUsd > 0 ? { ...indexed, inverted: indexed.mint === pool.tokenY } : cached;
+}
+
 function binRange(position, market) {
   const lo = position.lower_bin_id;
   const hi = position.upper_bin_id;
@@ -295,13 +301,14 @@ function binRange(position, market) {
     const cap = market.marketCapUsd * Math.exp(logPriceRatio(id));
     if (!Number.isFinite(cap) || cap <= 0) return '';
     return '<span class="range-market-cap" title="' + escape('Estimated ' + (market.symbol || 'token') +
-      ' market cap at this bin · DEX Screener reference') + '">' + compactUsd(cap) + '</span>';
+      ' market cap at this bin · ' + (market.marketCapSource || 'DEX Screener') + ' reference') + '">' + compactUsd(cap) + '</span>';
   };
   const outOfRange = active != null && (active < lo || active > hi);
   const state = position.status === 'closed' ? 'Closed' : active == null ? 'Active bin unavailable' :
     outOfRange ? 'Out of range' : 'In range';
   return '<div class="bin-range' + (outOfRange ? ' is-out-of-range' : '') +
-    '"><div class="range-bounds' + (single ? ' single-bin' : '') + '">' + bounds.map((label, i) => {
+    '">' + (active != null && step > 0 && !(market?.marketCapUsd > 0) ? '<small>Market cap unavailable</small>' : '') +
+    '<div class="range-bounds' + (single ? ' single-bin' : '') + '">' + bounds.map((label, i) => {
       const cap = capAtBin(i === 0 ? left : right);
       return cap ? '<span class="range-endpoint">' + cap + '<span>' + label + '</span></span>' : '<span>' + label + '</span>';
     }).join('') + '</div>' +
@@ -478,7 +485,7 @@ function walletDetail(db, req, w, csrf, canReadBins) {
       const flags = info?.risks?.join(', ');
       return [poolLink(p.pool, p.pool_name) + (flags ? '<br><small>' + raw(flags) + '</small>' : ''),
         metric(usd(info?.fdv) + ' / ' + usd(info?.tvl), (info?.fdvSource || 'Jupiter') + ' price × supply · Meteora TVL'),
-        positionRange(p, binsFor.all(p.position_pubkey), canReadBins, caps[p.pool]),
+        positionRange(p, binsFor.all(p.position_pubkey), canReadBins, rangeMarket(info, caps[p.pool])),
         metric(money(req, db, p.pnl_sol, p.pnl_usd, true), source(req) + ' · Position PnL'), when(p.opened_at) + '<br><small>' +
         (p.closed_at && p.opened_at ? num((p.closed_at - p.opened_at) / DAY, 1) + ' d' : age(p.opened_at)) + '</small>',
         money(req, db, p.deposit_sol, p.deposit_usd), money(req, db, p.withdraw_sol),
@@ -651,7 +658,9 @@ export function createWeb({ db, settings, tools }) {
               liquidityChart(historical, bins, at, 'Configured deposit amount') + '</div>';
           }
         }
-        return { range: binRange(indexed, rangeMarketCaps(db)[position.pool]), strategy: positionStrategy(strategy), chart };
+        const poolDetail = db.prepare('SELECT detail FROM pool_snapshots WHERE pool=? ORDER BY id DESC LIMIT 1').pluck().get(position.pool);
+        const market = rangeMarket(poolDetail ? JSON.parse(poolDetail) : null, rangeMarketCaps(db)[position.pool]);
+        return { range: binRange(indexed, market), strategy: positionStrategy(strategy), chart };
       });
       cached = { until: Date.now() + 45000, result };
       binCache.set(id, cached);

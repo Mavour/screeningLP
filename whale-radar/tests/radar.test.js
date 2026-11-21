@@ -23,6 +23,7 @@ import { refreshWallet } from '../src/jobs/wallets.js';
 import { publicHealth, radarReport } from '../src/radar-report.js';
 import { refreshIntel, trending, trendingScore, whalePools } from '../src/intel/pools.js';
 import { http, ProviderError } from '../src/clients/http.js';
+import { normalizePool } from '../src/clients/providers.js';
 import { publicTelegramDelivery, publicTelegramMessage } from '../src/notify/public-telegram.js';
 import { classifyOpeningMarket, openingMarketLookup } from '../src/opening-market.js';
 import { refreshPublicMarket } from '../src/public-snapshot.js';
@@ -518,6 +519,17 @@ describe('dashboard and intelligence', () => {
       { source: 'Meteora' }).text).toContain('Market cap  –\n');
   });
 
+  it('uses market cap supplied by Meteora without reading a conflicting DEX Screener quote', async () => {
+    const pool = normalizePool({ address: mockPool, token_x: { address: mockPosition, symbol: 'TTWO', market_cap: 5334309 },
+      token_y: { address: SOL } });
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    cleanups.push(() => vi.unstubAllGlobals());
+    expect((await openingMarketLookup()([pool])).get(mockPool))
+      .toMatchObject({ mint: mockPosition, marketCapUsd: 5334309, marketCapSource: 'Meteora' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('categorizes pending openings during market refresh and shows all three sections in Openings', async () => {
     const ctx = fixture(':memory:', { webPassword: await bcrypt.hash('private', 4) });
     await discover(ctx);
@@ -657,8 +669,14 @@ describe('dashboard and intelligence', () => {
     ctx.db.prepare(`UPDATE positions SET lower_bin_id=?,upper_bin_id=?,active_bin_id=0,bin_step=10000,
       strategy_label='BIDASK',strategy_source='instruction' WHERE position_pubkey=?`)
       .run(inverted ? 0 : -1, inverted ? 1 : 0, mockPosition);
-    setMeta(ctx.db, 'public_range_market_caps', JSON.stringify({ at: ctx.now,
-      byPool: { [mockPool]: { marketCapUsd: 1000000, symbol: 'TOKEN', inverted } } }));
+    if (inverted) {
+      const pool = normalizePool({ address: mockPool, token_x: { address: SOL },
+        token_y: { address: mockPosition, symbol: 'TOKEN', market_cap: 1000000 } });
+      snapshot(ctx.db, { ...pool, takenAt: ctx.now }, ctx.now);
+    } else {
+      setMeta(ctx.db, 'public_range_market_caps', JSON.stringify({ at: ctx.now,
+        byPool: { [mockPool]: { marketCapUsd: 1000000, symbol: 'TOKEN', inverted } } }));
+    }
     ctx.tools = { positionBins: async () => ({ bins: [{ id: 0, liquidity: 1 }] }), applyBins: position => position };
     const app = createWeb(ctx);
     cleanups.push(() => app.close());
@@ -669,6 +687,7 @@ describe('dashboard and intelligence', () => {
     for (const html of [profile.body, bins.json().range]) {
       expect(html).toContain('>$500K</span><span>-50%</span>');
       expect(html).toContain('>$1M</span><span>0%</span>');
+      expect(html).toContain((inverted ? 'Meteora' : 'DEX Screener') + ' reference');
     }
   });
 

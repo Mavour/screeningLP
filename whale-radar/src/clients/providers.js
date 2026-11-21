@@ -50,6 +50,7 @@ export function normalizePool(row) {
   return {
     address: row.address, name: row.name, tokenMint: token?.address, tokenX: x?.address, tokenY: y?.address,
     tokenXSymbol: x?.symbol, tokenYSymbol: y?.symbol,
+    marketCapXUsd: finite(x?.market_cap), marketCapYUsd: finite(y?.market_cap),
     decimalsX: finite(x?.decimals), decimalsY: finite(y?.decimals), tvl, fees1, fees24,
     volume1: finite(row.volume?.['1h']), volume24: finite(row.volume?.['24h']),
     feeTvl: tvl > 0 && fees24 != null ? fees24 / tvl : null,

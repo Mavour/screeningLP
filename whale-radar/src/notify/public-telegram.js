@@ -38,7 +38,8 @@ export function publicTelegramMessage(event, report, dashboardUrl = '') {
     'Sisi deposit  ' + (depositSides[event.depositSide] ?? '–'), 'Range pembukaan  ' + openingRange(event),
     'Waktu transaksi  ' + time,
     ...(event.smartLpStatus === 'verified' ? ['Status wallet  Verified Smart LP'] : []),
-    '', ...poolFacts(pool), '', 'Sumber  ' + report.source + (alertMarket?.marketCapUsd > 0 ? ' + DEX Screener' : ''),
+    '', ...poolFacts(pool), '', 'Sumber  ' + report.source +
+      (alertMarket?.marketCapUsd > 0 && alertMarket.marketCapSource !== 'Meteora' ? ' + DEX Screener' : ''),
   ].join('\n');
   const buttons = [{ text: 'Pool Meteora', url: pool.poolUrl }, { text: 'Transaksi Solscan', url: event.transactionUrl }];
   if (dashboardUrl) {
